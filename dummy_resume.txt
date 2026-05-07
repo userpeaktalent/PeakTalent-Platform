@@ -1,0 +1,22 @@
+This is a dummy resume for testing purposes.
+
+**Name:** John Doe
+**Email:** john.doe@example.com
+**Phone:** +1 555-0102
+
+**Summary:**
+Experienced Software Engineer with a focus on frontend technologies. Passionate about building responsive and user-friendly web applications.
+
+**Experience:**
+*   **Senior Frontend Developer** at TechCorp (2020 - Present)
+    *   Led a team of 5 developers.
+    *   Migrated legacy app to React.
+    *   Improved performance by 40%.
+*   **Web Developer** at WebSolutions (2018 - 2020)
+    *   Built e-commerce sites using Shopify and WordPress.
+
+**Education:**
+*   **B.S. Computer Science**, University of Technology (2014 - 2018)
+
+**Skills:**
+*   React, TypeScript, Tailwind CSS, Node.js, Git.

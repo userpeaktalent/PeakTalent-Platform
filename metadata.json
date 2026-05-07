@@ -1,0 +1,5 @@
+{
+  "name": "PeakTalent",
+  "description": "An AI-powered application by PeakTalent that pairs job seekers with job requests from recruiters. It uses Gemini to parse resumes, generate job descriptions, and facilitate a matching process based on skills and preferences.",
+  "requestFramePermissions": []
+}

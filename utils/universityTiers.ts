@@ -1,0 +1,239 @@
+/**
+ * University Prestige Tier Lookup
+ * 
+ * Tier 1: Top 50 global universities (score → 1.0)
+ * Tier 2: Top 200 global universities (score → 0.75)
+ * Tier 3: Top 500 global universities (score → 0.5)
+ * Tier 4: All others (score → 0.35)
+ *
+ * Sources: QS / THE / Shanghai rankings aggregate.
+ * Names are lowercase-normalized for fuzzy lookup.
+ */
+
+const TIER_1_UNIVERSITIES: string[] = [
+    // US
+    'mit', 'massachusetts institute of technology',
+    'stanford', 'stanford university',
+    'harvard', 'harvard university',
+    'caltech', 'california institute of technology',
+    'princeton', 'princeton university',
+    'yale', 'yale university',
+    'columbia', 'columbia university',
+    'chicago', 'university of chicago',
+    'upenn', 'university of pennsylvania', 'penn',
+    'johns hopkins', 'johns hopkins university',
+    'duke', 'duke university',
+    'northwestern', 'northwestern university',
+    'cornell', 'cornell university',
+    'berkeley', 'uc berkeley', 'university of california berkeley',
+    'ucla', 'university of california los angeles',
+    'carnegie mellon', 'cmu',
+    'georgia tech', 'georgia institute of technology',
+    // UK
+    'oxford', 'university of oxford',
+    'cambridge', 'university of cambridge',
+    'imperial', 'imperial college london', 'imperial college',
+    'ucl', 'university college london',
+    'lse', 'london school of economics',
+    // Europe
+    'eth zurich', 'eth', 'eidgenössische technische hochschule zürich',
+    'epfl', 'école polytechnique fédérale de lausanne',
+    'polytechnic of milan', 'politecnico di milano', 'polimi',
+    'sorbonne', 'sorbonne university', 'université paris-saclay', 'paris-saclay',
+    'tu munich', 'tum', 'technische universität münchen',
+    'lmu munich', 'ludwig maximilian university',
+    'ku leuven',
+    'delft', 'tu delft',
+    'bocconi', 'università bocconi', 'universita bocconi',
+    // Asia-Pacific
+    'nus', 'national university of singapore',
+    'ntu', 'nanyang technological university',
+    'tsinghua', 'tsinghua university',
+    'peking', 'peking university',
+    'university of tokyo', 'tokyo university', 'todai',
+    'kaist',
+    'university of melbourne',
+    'university of sydney',
+    // Canada
+    'university of toronto', 'u of t',
+    'mcgill', 'mcgill university',
+    'ubc', 'university of british columbia',
+    'waterloo', 'university of waterloo',
+];
+
+const TIER_2_UNIVERSITIES: string[] = [
+    // US
+    'michigan', 'university of michigan', 'umich',
+    'nyu', 'new york university',
+    'usc', 'university of southern california',
+    'boston university', 'bu',
+    'wisconsin', 'university of wisconsin',
+    'illinois', 'uiuc', 'university of illinois',
+    'purdue', 'purdue university',
+    'ut austin', 'university of texas austin',
+    'washington', 'university of washington',
+    'brown', 'brown university',
+    'rice', 'rice university',
+    'vanderbilt', 'vanderbilt university',
+    'dartmouth', 'dartmouth college',
+    'emory', 'emory university',
+    // UK
+    'edinburgh', 'university of edinburgh',
+    'manchester', 'university of manchester',
+    'kings college', "king's college london", 'kcl',
+    'warwick', 'university of warwick',
+    'bristol', 'university of bristol',
+    'st andrews', 'university of st andrews',
+    'durham', 'durham university',
+    'bath', 'university of bath',
+    // Europe
+    'tu berlin', 'technische universität berlin',
+    'rwth aachen', 'rwth',
+    'heidelberg', 'university of heidelberg', 'ruprecht-karls-universität heidelberg',
+    'sapienza', 'sapienza university of rome', 'la sapienza',
+    'university of bologna', 'alma mater studiorum', 'unibo',
+    'university of padua', 'università di padova', 'unipd',
+    'university of turin', 'università di torino', 'unito',
+    'polytechnic of turin', 'politecnico di torino', 'polito',
+    'university of trento', 'unitn',
+    'luiss', 'luiss guido carli',
+    'university of navarra',
+    'ie business school', 'ie university',
+    'esade',
+    'hec paris', 'hec',
+    'insead',
+    'école polytechnique', 'polytechnique',
+    'sciences po',
+    'university of amsterdam', 'uva',
+    'erasmus', 'erasmus university rotterdam',
+    'copenhagen', 'university of copenhagen',
+    'lund', 'lund university',
+    'kth', 'kth royal institute of technology',
+    'university of zurich', 'uzh',
+    'university of geneva', 'unige',
+    // Asia-Pacific
+    'university of hong kong', 'hku',
+    'hkust', 'hong kong university of science and technology',
+    'seoul national university', 'snu',
+    'kyoto university',
+    'osaka university',
+    'fudan', 'fudan university',
+    'zhejiang', 'zhejiang university',
+    'university of new south wales', 'unsw',
+    'monash', 'monash university',
+    'anu', 'australian national university',
+    // Middle East
+    'technion', 'technion - israel institute of technology',
+    'hebrew university', 'hebrew university of jerusalem',
+    'kaust',
+    // Canada
+    'university of montreal', 'université de montréal',
+    'university of alberta',
+    'queens university',
+    // Latin America
+    'usp', 'universidade de são paulo',
+    'unam',
+];
+
+const TIER_3_UNIVERSITIES: string[] = [
+    // Broader well-known universities
+    'arizona state', 'asu',
+    'ohio state', 'osu',
+    'penn state', 'pennsylvania state university',
+    'michigan state',
+    'virginia tech',
+    'unc', 'university of north carolina',
+    'florida', 'university of florida',
+    'texas a&m',
+    'iowa state',
+    'colorado', 'university of colorado',
+    'rutgers', 'rutgers university',
+    'maryland', 'university of maryland',
+    'leeds', 'university of leeds',
+    'nottingham', 'university of nottingham',
+    'sheffield', 'university of sheffield',
+    'southampton', 'university of southampton',
+    'birmingham', 'university of birmingham',
+    'glasgow', 'university of glasgow',
+    'queen mary', 'queen mary university of london',
+    'exeter', 'university of exeter',
+    'university of naples', 'università di napoli federico ii', 'federico ii',
+    'university of florence', 'università di firenze', 'unifi',
+    'university of milan', 'università degli studi di milano', 'unimi',
+    'university of pisa', 'università di pisa', 'unipi',
+    'catholic university', 'università cattolica del sacro cuore', 'cattolica',
+    'ca foscari', 'università ca foscari venezia',
+    'university of genoa', 'università di genova', 'unige genova',
+    'university of verona', 'università di verona', 'univr',
+    'university of vienna', 'universität wien',
+    'tu vienna', 'technische universität wien',
+    'university of barcelona', 'universitat de barcelona',
+    'complutense', 'universidad complutense de madrid',
+    'university of lisbon',
+    'trinity college dublin', 'tcd',
+    'university of oslo',
+    'university of helsinki',
+    'aalto', 'aalto university',
+    'chalmers', 'chalmers university of technology',
+    'university of gothenburg',
+    'university of warsaw',
+    'charles university', 'prague',
+    'university of cape town', 'uct',
+    'stellenbosch',
+    'iit bombay', 'iit delhi', 'iit madras', 'iit kanpur', 'iit kharagpur',
+    'bits pilani',
+    'iisc', 'indian institute of science',
+    'yonsei', 'yonsei university',
+    'korea university',
+    'university of queensland', 'uq',
+    'university of auckland',
+    'king abdulaziz university',
+];
+
+/** Normalize a university name for lookup. */
+const normalizeUniName = (name: string): string =>
+    name.toLowerCase().trim()
+        .replace(/[''`]/g, "'")
+        .replace(/[–—]/g, '-')
+        .replace(/\s+/g, ' ');
+
+const tier1Set = new Set(TIER_1_UNIVERSITIES.map(normalizeUniName));
+const tier2Set = new Set(TIER_2_UNIVERSITIES.map(normalizeUniName));
+const tier3Set = new Set(TIER_3_UNIVERSITIES.map(normalizeUniName));
+
+/**
+ * Returns the prestige tier for a university.
+ * 1 = top 50, 2 = top 200, 3 = top 500, 4 = other/unknown
+ */
+export const getUniversityTier = (institutionName: string): number => {
+    if (!institutionName) return 4;
+    const name = normalizeUniName(institutionName);
+
+    // Exact match
+    if (tier1Set.has(name)) return 1;
+    if (tier2Set.has(name)) return 2;
+    if (tier3Set.has(name)) return 3;
+
+    // Substring match: check if any known name appears in the input or vice versa
+    for (const known of tier1Set) {
+        if (known.length >= 4 && (name.includes(known) || known.includes(name))) return 1;
+    }
+    for (const known of tier2Set) {
+        if (known.length >= 4 && (name.includes(known) || known.includes(name))) return 2;
+    }
+    for (const known of tier3Set) {
+        if (known.length >= 4 && (name.includes(known) || known.includes(name))) return 3;
+    }
+
+    return 4;
+};
+
+/** Convert tier number to a 0–1 score. */
+export const universityTierToScore = (tier: number): number => {
+    switch (tier) {
+        case 1: return 1.0;
+        case 2: return 0.75;
+        case 3: return 0.5;
+        default: return 0.35;
+    }
+};

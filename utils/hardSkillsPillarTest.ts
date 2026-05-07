@@ -1,0 +1,767 @@
+/**
+ * Hard-Skills Pillar Test Suite
+ *
+ * Isolates the `hardSkillsScore` output of calculateMatchScore across many
+ * controlled candidate/job scenarios. Goal:
+ *   - reward candidates who actually have the required skills (exact/synonym)
+ *   - give partial credit for related skills in the same cluster
+ *   - avoid false positives (Java vs JavaScript, R vs React)
+ *   - not confuse inferred-from-role skills with actually-listed skills
+ *   - cleanly separate good / fair / poor fits (no plateaus)
+ *   - honour level requirements (a junior != a senior on the same stack)
+ *
+ * Run with: npm run test:ranking:hard
+ *
+ * NOTE: This intentionally reads ONLY `breakdown.hardSkillsScore` — other
+ * pillars are muted by neutral-default factories. Weights are NOT touched.
+ */
+import { calculateMatchScore } from './matchingUtils';
+import { JobProfile, CandidateProfile } from '../types';
+
+let passed = 0;
+let failed = 0;
+const failures: string[] = [];
+
+const fmt = (s: number) => `${(s * 100).toFixed(1)}%`;
+
+function assert(condition: boolean, msg: string, details?: string) {
+    if (condition) {
+        console.log(`  ✅ ${msg}`);
+        passed++;
+    } else {
+        const full = `${msg}${details ? ` — ${details}` : ''}`;
+        console.error(`  ❌ ${full}`);
+        failures.push(full);
+        failed++;
+    }
+}
+
+function assertRange(value: number, min: number, max: number, label: string) {
+    const ok = value >= min && value <= max;
+    assert(ok, label, `got ${fmt(value)}, expected ${fmt(min)}–${fmt(max)}`);
+}
+
+function assertGt(a: number, b: number, labelA: string, labelB: string, minGap = 0.005) {
+    const gap = a - b;
+    assert(
+        gap >= minGap,
+        `${labelA} (${fmt(a)}) > ${labelB} (${fmt(b)})`,
+        gap < 0 ? `order reversed by ${fmt(-gap)}` : gap < minGap ? `gap ${fmt(gap)} < ${fmt(minGap)}` : undefined
+    );
+}
+
+function assertOrdered(scores: Array<{ label: string; score: number }>, minGap = 0.005) {
+    for (let i = 0; i < scores.length - 1; i++) {
+        assertGt(scores[i].score, scores[i + 1].score, scores[i].label, scores[i + 1].label, minGap);
+    }
+}
+
+function printRanking(title: string, items: Array<{ label: string; score: number }>) {
+    console.log(`\n  ${title}`);
+    items.forEach((it, idx) => console.log(`    ${idx + 1}. ${fmt(it.score).padStart(6)} — ${it.label}`));
+}
+
+// ─── Profile Factories ──────────────────────────────────────────────────────
+// Deliberately minimal: strip every field the hard-skills pillar does not
+// consume, and neutralize everything else so the score reflects ONLY the
+// interaction of must/nice job skills with candidate skills (+ family-inferred).
+
+function mkCand(overrides: Partial<CandidateProfile> = {}): CandidateProfile {
+    return {
+        id: 'cand',
+        personal_info: { first_name: 'Test', last_name: 'User' },
+        contacts: { email: 't@t.com', phone: '0' },
+        residence: { country: 'switzerland', city: 'Geneva' },
+        summary_text: '',
+        current_job_function: '',
+        current_seniority_level: 'mid',
+        total_years_experience: 4,
+        skills: [],
+        it_skills: [],
+        soft_skills: [],
+        languages: [{ language: 'English', level: 'C1' }],
+        experiences: [],
+        education: [],
+        certifications: [],
+        preferences: {
+            remote: 'hybrid',
+            preferred_locations: [{ country: 'switzerland', city: 'Geneva' }],
+            desired_contract_types: ['full_time'],
+            salary_eur: { min: 60000, flexibility: true },
+            work_eligibility_countries: ['switzerland', 'eu'],
+        },
+        embedding_vector: undefined,
+        ...overrides,
+    };
+}
+
+function mkJob(overrides: Partial<JobProfile> = {}): JobProfile {
+    return {
+        id: 'job',
+        title: '',
+        industry: ['Technology'],
+        job_function: 'engineering',
+        seniority_level: 'mid',
+        summary_text: '',
+        company_name: 'Co',
+        skills: [],
+        it_skills: [],
+        soft_skills: [],
+        constraints: {
+            location: { country: 'switzerland', city: 'Geneva' },
+            contract_type: 'full_time',
+            remote: 'hybrid',
+            languages: [{ language: 'English', level: 'B2' }],
+            salary_eur: { min: 50000, max: 120000 },
+        },
+        experience_required: 3,
+        embedding_vector: undefined,
+        ...overrides,
+    };
+}
+
+const hardOf = (job: JobProfile, cand: CandidateProfile) =>
+    calculateMatchScore(job, cand).hardSkillsScore;
+
+// ─── Test Suites ─────────────────────────────────────────────────────────────
+
+function testExactMatch() {
+    console.log('\n═══ 1. EXACT & SYNONYM MATCH ═══');
+    const job = mkJob({
+        skills: [
+            { skill_name: 'React', level: 8, must: true },
+            { skill_name: 'TypeScript', level: 7, must: true },
+        ],
+    });
+
+    const perfect = mkCand({
+        skills: [
+            { skill_name: 'React', level: 9, level_source: 'chat_validated', level_confidence: 'high' },
+            { skill_name: 'TypeScript', level: 8, level_source: 'chat_validated', level_confidence: 'high' },
+        ],
+    });
+    const synonym = mkCand({
+        skills: [
+            { skill_name: 'React.js', level: 9, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'TS', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+    });
+    const exact = hardOf(job, perfect);
+    const syn = hardOf(job, synonym);
+
+    assertRange(exact, 0.95, 1.0, 'Perfect exact match: React+TS (chat_validated high)');
+    assertRange(syn, 0.88, 1.0, 'Synonym match: React.js+TS');
+    // Synonym match must not exceed explicit chat-validated match
+    assert(syn <= exact + 0.001, `synonym (${fmt(syn)}) ≤ perfect (${fmt(exact)})`);
+}
+
+function testClusterPartial() {
+    console.log('\n═══ 2. CLUSTER PARTIAL CREDIT ═══');
+
+    // React job, Vue candidate — both in frontend-frameworks cluster (partialScore 0.70)
+    const reactJob = mkJob({ skills: [{ skill_name: 'React', level: 8, must: true }] });
+    const vueCand = mkCand({
+        skills: [{ skill_name: 'Vue', level: 8, level_source: 'cv_only', level_confidence: 'high' }],
+    });
+    const reactCand = mkCand({
+        skills: [{ skill_name: 'React', level: 8, level_source: 'cv_only', level_confidence: 'high' }],
+    });
+    const unrelated = mkCand({
+        skills: [{ skill_name: 'Cooking', level: 8, level_source: 'cv_only', level_confidence: 'high' }],
+    });
+
+    const scoreReact = hardOf(reactJob, reactCand);
+    const scoreVue = hardOf(reactJob, vueCand);
+    const scoreUnrel = hardOf(reactJob, unrelated);
+
+    printRanking('React job ranking:', [
+        { label: 'React→React', score: scoreReact },
+        { label: 'Vue→React (cluster 0.70)', score: scoreVue },
+        { label: 'Cooking→React', score: scoreUnrel },
+    ]);
+    assertGt(scoreReact, scoreVue, 'React match', 'Vue (cluster)');
+    assertGt(scoreVue, scoreUnrel, 'Vue (cluster)', 'Unrelated');
+    assertRange(scoreVue, 0.45, 0.85, 'Vue→React cluster credit');
+    assertRange(scoreUnrel, 0.0, 0.35, 'Unrelated skill for React must');
+}
+
+function testFalsePositiveJavaJavaScript() {
+    console.log('\n═══ 3. FALSE POSITIVE: Java ≠ JavaScript ═══');
+    const jsJob = mkJob({
+        skills: [{ skill_name: 'JavaScript', level: 8, must: true }],
+    });
+    // Pure Java backend candidate — no frontend/web exposure whatsoever.
+    const javaBackend = mkCand({
+        summary_text: 'Java backend engineer building Spring microservices.',
+        skills: [
+            { skill_name: 'Java', level: 9, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'Spring', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+        experiences: [
+            { role: 'Java Backend Engineer', company: 'BankCo', location: { country: 'switzerland', city: 'Zurich' }, from: '2019-01', to: 'present', is_current_position: true, description: 'Java Spring microservices on JVM.' },
+        ],
+    });
+    const score = hardOf(jsJob, javaBackend);
+    console.log(`    Java→JavaScript: ${fmt(score)}`);
+    assert(score < 0.5, `Java should NOT match JavaScript (got ${fmt(score)})`);
+    assertRange(score, 0.0, 0.5, 'Java (no FE exposure) for JavaScript must');
+}
+
+function testFalsePositiveRReact() {
+    console.log('\n═══ 4. FALSE POSITIVE: R ≠ React ═══');
+    const reactJob = mkJob({ skills: [{ skill_name: 'React', level: 7, must: true }] });
+    const rCand = mkCand({
+        skills: [{ skill_name: 'R', level: 9, level_source: 'cv_only', level_confidence: 'high' }],
+    });
+    const s = hardOf(reactJob, rCand);
+    console.log(`    R→React: ${fmt(s)}`);
+    assert(s < 0.5, `R should NOT match React (got ${fmt(s)})`);
+}
+
+function testInferredFromFamilyNotCountingAsMust() {
+    console.log('\n═══ 5. INFERRED SKILLS ≠ EXPLICIT MUST COVERAGE ═══');
+    // JavaScript must-skill. Candidate does not list JavaScript, but has a
+    // "frontend developer" description (triggers frontend-web family rule,
+    // which infers JavaScript). That's evidence of plausibility, not of
+    // explicit proficiency. Score should be BELOW a candidate who actually
+    // lists JavaScript as a skill.
+    const jsJob = mkJob({ skills: [{ skill_name: 'JavaScript', level: 8, must: true }] });
+
+    const explicitJs = mkCand({
+        skills: [{ skill_name: 'JavaScript', level: 8, level_source: 'cv_only', level_confidence: 'high' }],
+    });
+    const inferredOnly = mkCand({
+        summary_text: 'Frontend developer with several years building web UIs.',
+        experiences: [
+            { role: 'Frontend Developer', company: 'WebCo', location: { country: 'ch', city: 'Geneva' }, from: '2020-01', to: 'present', is_current_position: true, description: 'Built web UIs.' },
+        ],
+        // no explicit JavaScript skill listed
+    });
+    const neitherNor = mkCand({
+        summary_text: 'Product manager doing roadmap planning.',
+        skills: [{ skill_name: 'Agile', level: 8, level_source: 'cv_only', level_confidence: 'high' }],
+    });
+
+    const sExplicit = hardOf(jsJob, explicitJs);
+    const sInferred = hardOf(jsJob, inferredOnly);
+    const sNeither = hardOf(jsJob, neitherNor);
+
+    printRanking('JavaScript-must ranking:', [
+        { label: 'Explicit JavaScript', score: sExplicit },
+        { label: 'Frontend role only (inferred JS)', score: sInferred },
+        { label: 'Unrelated PM', score: sNeither },
+    ]);
+    assertGt(sExplicit, sInferred, 'Explicit JS', 'Inferred-only JS');
+    assertGt(sInferred, sNeither, 'Inferred-only JS', 'Unrelated PM');
+    assertRange(sExplicit, 0.90, 1.0, 'Explicit JS proficiency');
+    // Inferred should land in a honest partial band — not 0, not full match.
+    assertRange(sInferred, 0.30, 0.75, 'Frontend-role inferred JS');
+}
+
+function testLevelGap() {
+    console.log('\n═══ 6. LEVEL GAP PENALTY ═══');
+    const job = mkJob({ skills: [{ skill_name: 'React', level: 9, must: true }] });
+
+    const senior = mkCand({
+        skills: [{ skill_name: 'React', level: 9, level_source: 'chat_validated', level_confidence: 'high' }],
+    });
+    const mid = mkCand({
+        skills: [{ skill_name: 'React', level: 7, level_source: 'cv_only', level_confidence: 'high' }],
+    });
+    const junior = mkCand({
+        skills: [{ skill_name: 'React', level: 4, level_source: 'cv_only', level_confidence: 'medium' }],
+    });
+    const noob = mkCand({
+        skills: [{ skill_name: 'React', level: 2, level_source: 'cv_only', level_confidence: 'low' }],
+    });
+
+    const rankings = [
+        { label: 'Senior (9)', score: hardOf(job, senior) },
+        { label: 'Mid (7, ≈80%)', score: hardOf(job, mid) },
+        { label: 'Junior (4)', score: hardOf(job, junior) },
+        { label: 'Noob (2)', score: hardOf(job, noob) },
+    ];
+    printRanking('Level gap ranking (job needs React level 9):', rankings);
+    assertOrdered(rankings, 0.003);
+    assertRange(rankings[0].score, 0.90, 1.0, 'Senior (perfect level)');
+    assertRange(rankings[3].score, 0.0, 0.55, 'Noob (level 2 vs 9 req)');
+}
+
+function testMissingMustVsNice() {
+    console.log('\n═══ 7. MUST vs NICE WEIGHT ═══');
+    const job = mkJob({
+        skills: [
+            { skill_name: 'React', level: 8, must: true },
+            { skill_name: 'TypeScript', level: 7, must: true },
+        ],
+        it_skills: [
+            { skill_name: 'Docker', level: 5, must: false },
+            { skill_name: 'AWS', level: 5, must: false },
+        ],
+    });
+
+    const bothMusts = mkCand({
+        skills: [
+            { skill_name: 'React', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'TypeScript', level: 7, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+    });
+    const oneMustNoNice = mkCand({
+        skills: [{ skill_name: 'React', level: 8, level_source: 'cv_only', level_confidence: 'high' }],
+    });
+    const onlyNice = mkCand({
+        it_skills: [
+            { skill_name: 'Docker', level: 6, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'AWS', level: 6, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+    });
+    const nothing = mkCand({});
+
+    const s1 = hardOf(job, bothMusts);
+    const s2 = hardOf(job, oneMustNoNice);
+    const s3 = hardOf(job, onlyNice);
+    const s4 = hardOf(job, nothing);
+
+    printRanking('Must/Nice mix:', [
+        { label: 'Both musts', score: s1 },
+        { label: '1 of 2 musts', score: s2 },
+        { label: 'Only nice-to-haves', score: s3 },
+        { label: 'Nothing', score: s4 },
+    ]);
+    assertOrdered([
+        { label: 'Both musts', score: s1 },
+        { label: '1 of 2 musts', score: s2 },
+        { label: 'Only nice-to-haves', score: s3 },
+        { label: 'Nothing', score: s4 },
+    ], 0.02);
+    assertRange(s1, 0.85, 1.0, 'Both musts covered');
+    assertRange(s3, 0.0, 0.45, 'Only nice-to-haves, zero must coverage');
+    assertRange(s4, 0.0, 0.20, 'Nothing');
+}
+
+function testNoPlateauTopBand() {
+    console.log('\n═══ 8. NO PLATEAU AT TOP ═══');
+    // Two candidates who both "cover" the must skills should not tie at 100%
+    // when one has stronger evidence than the other.
+    const job = mkJob({
+        skills: [
+            { skill_name: 'Python', level: 8, must: true },
+            { skill_name: 'SQL', level: 6, must: true },
+        ],
+    });
+
+    const strong = mkCand({
+        skills: [
+            { skill_name: 'Python', level: 9, level_source: 'chat_validated', level_confidence: 'high' },
+            { skill_name: 'SQL', level: 8, level_source: 'chat_validated', level_confidence: 'high' },
+            { skill_name: 'Pandas', level: 8, level_source: 'chat_validated', level_confidence: 'high' },
+        ],
+    });
+    const okay = mkCand({
+        skills: [
+            { skill_name: 'Python', level: 7, level_source: 'cv_only', level_confidence: 'medium' },
+            { skill_name: 'SQL', level: 6, level_source: 'cv_only', level_confidence: 'medium' },
+        ],
+    });
+
+    const sStrong = hardOf(job, strong);
+    const sOkay = hardOf(job, okay);
+    printRanking('Python+SQL coverage:', [
+        { label: 'Strong (chat-val, lvl↑, + Pandas)', score: sStrong },
+        { label: 'Okay (CV-only, medium conf, min levels)', score: sOkay },
+    ]);
+    assertGt(sStrong, sOkay, 'Strong', 'Okay');
+}
+
+function testClusterOrdering() {
+    console.log('\n═══ 9. CLUSTER PARTIAL SCORES ORDER ═══');
+    // Expect: exact (1.0) > same-cluster high-partial > same-cluster low-partial > unrelated
+    const job = mkJob({ skills: [{ skill_name: 'PostgreSQL', level: 7, must: true }] });
+
+    const pg = mkCand({ skills: [{ skill_name: 'PostgreSQL', level: 8, level_source: 'cv_only', level_confidence: 'high' }] });
+    const mysql = mkCand({ skills: [{ skill_name: 'MySQL', level: 8, level_source: 'cv_only', level_confidence: 'high' }] }); // sql-databases, 0.75
+    const mongo = mkCand({ skills: [{ skill_name: 'MongoDB', level: 8, level_source: 'cv_only', level_confidence: 'high' }] }); // nosql-document, different cluster → 0
+    const unrelated = mkCand({ skills: [{ skill_name: 'Photoshop', level: 8, level_source: 'cv_only', level_confidence: 'high' }] });
+
+    const rankings = [
+        { label: 'PostgreSQL (exact)', score: hardOf(job, pg) },
+        { label: 'MySQL (cluster 0.75)', score: hardOf(job, mysql) },
+        { label: 'MongoDB (different cluster)', score: hardOf(job, mongo) },
+        { label: 'Photoshop (unrelated)', score: hardOf(job, unrelated) },
+    ];
+    printRanking('PostgreSQL must ranking:', rankings);
+    // Exact > Cluster > {MongoDB, Photoshop}. MongoDB and Photoshop both have
+    // zero relation to PostgreSQL (neither shares a cluster with it), so they
+    // can legitimately tie at 0 — we don't assert order between them.
+    assertGt(rankings[0].score, rankings[1].score, 'Exact', 'Cluster');
+    assertGt(rankings[1].score, rankings[2].score, 'Cluster', 'Different-cluster');
+    assert(rankings[2].score <= rankings[1].score, 'MongoDB ≤ MySQL (cluster)');
+    assert(rankings[3].score <= rankings[1].score, 'Photoshop ≤ MySQL (cluster)');
+}
+
+function testMLClusterTransfer() {
+    console.log('\n═══ 10. ML DOMAIN CLUSTER TRANSFER ═══');
+    // User example from brief: someone proficient at Machine Learning probably
+    // also knows something about Deep Learning.
+    const dlJob = mkJob({ skills: [{ skill_name: 'Deep Learning', level: 7, must: true }] });
+
+    const hasDL = mkCand({ skills: [{ skill_name: 'Deep Learning', level: 8, level_source: 'cv_only', level_confidence: 'high' }] });
+    const hasML = mkCand({ skills: [{ skill_name: 'Machine Learning', level: 8, level_source: 'cv_only', level_confidence: 'high' }] });
+    const hasTf = mkCand({ skills: [{ skill_name: 'TensorFlow', level: 8, level_source: 'cv_only', level_confidence: 'high' }] });
+    const unrelated = mkCand({ skills: [{ skill_name: 'SEO', level: 8, level_source: 'cv_only', level_confidence: 'high' }] });
+
+    const rankings = [
+        { label: 'Deep Learning (exact)', score: hardOf(dlJob, hasDL) },
+        { label: 'Machine Learning (ai-ml-domain 0.70)', score: hardOf(dlJob, hasML) },
+        { label: 'TensorFlow (ai-ml-domain 0.70)', score: hardOf(dlJob, hasTf) },
+        { label: 'SEO', score: hardOf(dlJob, unrelated) },
+    ];
+    printRanking('Deep Learning must ranking:', rankings);
+    assertGt(rankings[0].score, rankings[1].score, 'Exact DL', 'ML cluster');
+    assertGt(rankings[1].score, rankings[3].score, 'ML cluster', 'SEO');
+    assertRange(rankings[1].score, 0.40, 0.85, 'ML→DL cluster partial');
+    assertRange(rankings[2].score, 0.40, 0.85, 'TensorFlow→DL cluster partial');
+}
+
+function testCsDegreeBoostsInferredPlausibility() {
+    console.log('\n═══ 11. CS DEGREE — inferred skills land in mid-band ═══');
+    // A CS grad with no explicit Python/SQL listed should still get SOME
+    // credit (inferred by computing-core rule) for a Python must-skill,
+    // but LESS than a candidate who lists Python explicitly.
+    const job = mkJob({ skills: [{ skill_name: 'Python', level: 6, must: true }] });
+
+    const explicit = mkCand({
+        skills: [{ skill_name: 'Python', level: 7, level_source: 'cv_only', level_confidence: 'high' }],
+    });
+    const csGradInferred = mkCand({
+        summary_text: 'Computer Science graduate looking for first engineering role.',
+        education: [{ degree_level: 'MSc', major: 'Computer Science', institution: 'EPFL', currently_pursuing: false, from: '2020', to: '2023' }],
+    });
+    const businessGrad = mkCand({
+        summary_text: 'Recent business administration graduate.',
+        education: [{ degree_level: 'BBA', major: 'Business Administration', institution: 'HEC', currently_pursuing: false, from: '2020', to: '2023' }],
+    });
+
+    const sE = hardOf(job, explicit);
+    const sCs = hardOf(job, csGradInferred);
+    const sBiz = hardOf(job, businessGrad);
+
+    printRanking('Python must — study inference:', [
+        { label: 'Explicit Python', score: sE },
+        { label: 'CS grad (inferred)', score: sCs },
+        { label: 'Business grad (none)', score: sBiz },
+    ]);
+    assertGt(sE, sCs, 'Explicit', 'CS-grad inferred');
+    assertGt(sCs, sBiz, 'CS-grad inferred', 'Business grad');
+    assertRange(sE, 0.85, 1.0, 'Explicit Python');
+    assertRange(sCs, 0.25, 0.75, 'CS-grad inferred Python');
+    assertRange(sBiz, 0.0, 0.30, 'Business grad');
+}
+
+function testJvmLanguageFamily() {
+    console.log('\n═══ 12. JVM LANGUAGE FAMILY (Java/Kotlin/Scala) ═══');
+    const javaJob = mkJob({ skills: [{ skill_name: 'Java', level: 7, must: true }] });
+
+    const java = mkCand({ skills: [{ skill_name: 'Java', level: 8, level_source: 'cv_only', level_confidence: 'high' }] });
+    const kotlin = mkCand({ skills: [{ skill_name: 'Kotlin', level: 8, level_source: 'cv_only', level_confidence: 'high' }] });
+    const scala = mkCand({ skills: [{ skill_name: 'Scala', level: 8, level_source: 'cv_only', level_confidence: 'high' }] });
+    const js = mkCand({ skills: [{ skill_name: 'JavaScript', level: 8, level_source: 'cv_only', level_confidence: 'high' }] });
+
+    const rankings = [
+        { label: 'Java (exact)', score: hardOf(javaJob, java) },
+        { label: 'Kotlin (jvm 0.65)', score: hardOf(javaJob, kotlin) },
+        { label: 'Scala (jvm 0.65)', score: hardOf(javaJob, scala) },
+        { label: 'JavaScript (NOT jvm)', score: hardOf(javaJob, js) },
+    ];
+    printRanking('Java must ranking:', rankings);
+    assertGt(rankings[0].score, rankings[1].score, 'Java', 'Kotlin');
+    assertGt(rankings[1].score, rankings[3].score, 'Kotlin', 'JavaScript');
+    assertGt(rankings[2].score, rankings[3].score, 'Scala', 'JavaScript');
+}
+
+function testSeparationGoodVsBad() {
+    console.log('\n═══ 13. CLEAR SEPARATION: good ≫ bad ═══');
+    const job = mkJob({
+        skills: [
+            { skill_name: 'Python', level: 8, must: true },
+            { skill_name: 'Pandas', level: 7, must: true },
+            { skill_name: 'Machine Learning', level: 6, must: true },
+        ],
+        it_skills: [{ skill_name: 'AWS', level: 5, must: false }],
+    });
+
+    const dataScientist = mkCand({
+        skills: [
+            { skill_name: 'Python', level: 9, level_source: 'chat_validated', level_confidence: 'high' },
+            { skill_name: 'Pandas', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'Machine Learning', level: 8, level_source: 'chat_validated', level_confidence: 'high' },
+            { skill_name: 'scikit-learn', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+        it_skills: [{ skill_name: 'AWS', level: 6, level_source: 'cv_only', level_confidence: 'medium' }],
+    });
+    const chef = mkCand({
+        skills: [
+            { skill_name: 'French Cuisine', level: 10, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'Pastry', level: 9, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+    });
+
+    const sDS = hardOf(job, dataScientist);
+    const sChef = hardOf(job, chef);
+    printRanking('DS job ranking:', [
+        { label: 'Data Scientist', score: sDS },
+        { label: 'Chef', score: sChef },
+    ]);
+    assert(sDS - sChef > 0.50, `Spread must be wide: ${fmt(sDS)} vs ${fmt(sChef)}`);
+    assertRange(sDS, 0.90, 1.0, 'Data Scientist');
+    assertRange(sChef, 0.0, 0.20, 'Chef');
+}
+
+function testEmptyBuckets() {
+    console.log('\n═══ 14. EDGE CASES (empty / minimal) ═══');
+
+    // No skills on job → neutral high-ish score
+    const emptyJob = mkJob({ skills: [], it_skills: [] });
+    const anyCand = mkCand({
+        skills: [{ skill_name: 'React', level: 8, level_source: 'cv_only', level_confidence: 'high' }],
+    });
+    const emptyScore = hardOf(emptyJob, anyCand);
+    console.log(`    Empty job/any cand: ${fmt(emptyScore)}`);
+    // We simply ensure it doesn't crash and returns something in [0, 1].
+    assert(emptyScore >= 0 && emptyScore <= 1, 'Empty-job score ∈ [0,1]');
+
+    // Job has only nice-to-haves, candidate covers them
+    const niceOnlyJob = mkJob({
+        skills: [{ skill_name: 'GraphQL', level: 5, must: false }],
+    });
+    const coverNice = mkCand({
+        skills: [{ skill_name: 'GraphQL', level: 7, level_source: 'cv_only', level_confidence: 'high' }],
+    });
+    const sNice = hardOf(niceOnlyJob, coverNice);
+    console.log(`    Nice-only job, covered: ${fmt(sNice)}`);
+    assertRange(sNice, 0.75, 1.0, 'Nice-only covered');
+}
+
+function testNoDoubleCountingSynonyms() {
+    console.log('\n═══ 15. SYNONYM DOES NOT STACK WITH SELF ═══');
+    // If candidate lists both "JavaScript" and "JS", they should score as one
+    // skill (not get double credit), because they are aliases.
+    const job = mkJob({ skills: [{ skill_name: 'JavaScript', level: 7, must: true }] });
+
+    const once = mkCand({
+        skills: [{ skill_name: 'JavaScript', level: 8, level_source: 'cv_only', level_confidence: 'high' }],
+    });
+    const twice = mkCand({
+        skills: [
+            { skill_name: 'JavaScript', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'JS', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+    });
+
+    const sOnce = hardOf(job, once);
+    const sTwice = hardOf(job, twice);
+    console.log(`    1x JS listed: ${fmt(sOnce)} / 2x (JS+JavaScript): ${fmt(sTwice)}`);
+    assert(Math.abs(sOnce - sTwice) < 0.05, `Listing JS twice should not boost hard-skills by >5%: |${fmt(sOnce)} - ${fmt(sTwice)}|`);
+}
+
+function testDomainProximityFloorForMissingSkills() {
+    console.log('\n═══ 16. DOMAIN PROXIMITY: missing skill, candidate clearly in family ═══');
+    // A frontend developer with Vue + JavaScript + CSS applies to a job
+    // requiring React + TypeScript + Tailwind. Every required skill has a
+    // cluster sibling in the candidate's stack. The candidate is clearly a
+    // frontend developer who could pick up the specific tools quickly —
+    // recruiter intuition says this is a strong match, not a 50% one.
+    const job = mkJob({
+        skills: [
+            { skill_name: 'React', level: 7, must: true },
+            { skill_name: 'TypeScript', level: 7, must: true },
+            { skill_name: 'Tailwind CSS', level: 5, must: true },
+        ],
+    });
+
+    // Cluster siblings across all 3 musts: Vue (frontend-frameworks),
+    // JavaScript (js-ts), Bootstrap (css-frameworks).
+    const allSiblings = mkCand({
+        skills: [
+            { skill_name: 'Vue', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'JavaScript', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'Bootstrap', level: 7, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+    });
+
+    // Two siblings + one missing (no CSS framework listed). Should still
+    // get good credit thanks to the proximity floor on the Tailwind miss.
+    const twoSiblingsOneMiss = mkCand({
+        skills: [
+            { skill_name: 'Vue', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'JavaScript', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+    });
+
+    // Single sibling, no other domain coverage — proximity is low.
+    const oneSiblingOnly = mkCand({
+        skills: [
+            { skill_name: 'Vue', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+    });
+
+    // Total mismatch — backend Java engineer.
+    const offDomain = mkCand({
+        skills: [
+            { skill_name: 'Java', level: 9, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'Spring', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+    });
+
+    const sAll = hardOf(job, allSiblings);
+    const sTwo = hardOf(job, twoSiblingsOneMiss);
+    const sOne = hardOf(job, oneSiblingOnly);
+    const sOff = hardOf(job, offDomain);
+
+    printRanking('Frontend job — soft match by family:', [
+        { label: 'All-3 cluster siblings (Vue + JS + Bootstrap)', score: sAll },
+        { label: 'Two siblings + 1 miss (proximity floor on miss)', score: sTwo },
+        { label: 'One sibling only (Vue), low proximity', score: sOne },
+        { label: 'Off-domain (Java/Spring)', score: sOff },
+    ]);
+
+    assertOrdered([
+        { label: 'all siblings', score: sAll },
+        { label: 'two + miss', score: sTwo },
+        { label: 'one only', score: sOne },
+        { label: 'off-domain', score: sOff },
+    ], 0.02);
+
+    // The user's core complaint: a candidate clearly in the family deserves
+    // a high score even if no skill is an exact match.
+    assertRange(sAll, 0.78, 1.0, 'All-3 cluster siblings — strong family match');
+    // Two-of-three siblings + 1 miss: thanks to the proximity floor the miss
+    // adds ~0.37 instead of 0. Should land comfortably above 50%.
+    assertRange(sTwo, 0.55, 0.85, 'Two siblings + 1 miss — solid family-level fit');
+    // Single sibling: candidate is partially in the family. Proximity floor
+    // is small (1/3 of bucket clusters), so misses still hurt.
+    assertRange(sOne, 0.20, 0.55, 'One sibling — limited family coverage');
+    // Off-domain: no proximity, no cluster matches → near zero.
+    assertRange(sOff, 0.0, 0.15, 'Off-domain candidate — no credit');
+}
+
+function testProximityFloorRespectsClusterMatches() {
+    console.log('\n═══ 17. PROXIMITY FLOOR DOES NOT BEAT REAL CLUSTER MATCHES ═══');
+    // Even when proximity is maximal, an actual cluster sibling must score
+    // higher than a pure proximity-floor pass. Otherwise candidates who list
+    // *something* in the cluster would tie with those who list nothing.
+    const job = mkJob({
+        skills: [
+            { skill_name: 'PostgreSQL', level: 7, must: true },
+            { skill_name: 'Redis', level: 6, must: true },
+        ],
+    });
+
+    // Has explicit MySQL (cluster sibling of PostgreSQL) and Memcached
+    // (cluster sibling of Redis). Both musts get cluster credit (~0.78 each).
+    const bothClusterSiblings = mkCand({
+        skills: [
+            { skill_name: 'MySQL', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'Memcached', level: 7, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+    });
+
+    // Has MySQL only — Redis has zero cluster match but proximity = 0.5
+    // (1 of 2 bucket clusters covered). Floor = 0.5 * 0.55 = 0.275.
+    const oneClusterPlusFloor = mkCand({
+        skills: [
+            { skill_name: 'MySQL', level: 8, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+    });
+
+    const sBoth = hardOf(job, bothClusterSiblings);
+    const sFloor = hardOf(job, oneClusterPlusFloor);
+
+    printRanking('Cluster-match vs proximity floor:', [
+        { label: 'Both cluster siblings (MySQL + Memcached)', score: sBoth },
+        { label: 'MySQL only (Redis miss + floor)', score: sFloor },
+    ]);
+    assertGt(sBoth, sFloor, 'Both cluster siblings', 'One + floor', 0.10);
+    assertRange(sBoth, 0.70, 0.85, 'Both cluster siblings score');
+}
+
+function testProximityFloorScalesWithCoverage() {
+    console.log('\n═══ 18. PROXIMITY FLOOR SCALES WITH DOMAIN COVERAGE ═══');
+    // The more of the job's domain the candidate covers explicitly, the
+    // higher the floor for the missing pieces. A candidate who covers
+    // 4-of-5 musts in cluster should score higher on the missing one than
+    // a candidate who only covers 1-of-5.
+    const job = mkJob({
+        skills: [
+            { skill_name: 'React', level: 7, must: true },
+            { skill_name: 'TypeScript', level: 7, must: true },
+            { skill_name: 'Redux', level: 6, must: true },
+            { skill_name: 'Tailwind CSS', level: 5, must: true },
+            { skill_name: 'Jest', level: 5, must: true },
+        ],
+    });
+
+    // 4-of-5 clusters covered (frontend, js-ts, state-management, css-frameworks)
+    // but Jest (js-test-frameworks) not. proximity = 4/5 = 0.8 → floor ≈ 0.44.
+    const wideCoverageMissesJest = mkCand({
+        skills: [
+            { skill_name: 'React', level: 7, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'TypeScript', level: 7, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'Redux', level: 6, level_source: 'cv_only', level_confidence: 'high' },
+            { skill_name: 'Tailwind CSS', level: 5, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+    });
+    // Only 1 cluster covered → proximity = 0.2 → floor ≈ 0.11.
+    const narrowCoverage = mkCand({
+        skills: [
+            { skill_name: 'React', level: 7, level_source: 'cv_only', level_confidence: 'high' },
+        ],
+    });
+
+    const sWide = hardOf(job, wideCoverageMissesJest);
+    const sNarrow = hardOf(job, narrowCoverage);
+    printRanking('5-skill bucket — coverage breadth:', [
+        { label: '4-of-5 covered + 1 miss (high proximity)', score: sWide },
+        { label: '1-of-5 covered (low proximity)', score: sNarrow },
+    ]);
+    assertGt(sWide, sNarrow, '4/5 coverage', '1/5 coverage', 0.30);
+    assertRange(sWide, 0.80, 1.0, '4-of-5 covered with proximity floor');
+}
+
+// ─── Runner ──────────────────────────────────────────────────────────────────
+
+function run() {
+    console.log('═══════════════════════════════════════════════════════════════');
+    console.log('   HARD-SKILLS PILLAR ISOLATION TESTS');
+    console.log('═══════════════════════════════════════════════════════════════');
+
+    testExactMatch();
+    testClusterPartial();
+    testFalsePositiveJavaJavaScript();
+    testFalsePositiveRReact();
+    testInferredFromFamilyNotCountingAsMust();
+    testLevelGap();
+    testMissingMustVsNice();
+    testNoPlateauTopBand();
+    testClusterOrdering();
+    testMLClusterTransfer();
+    testCsDegreeBoostsInferredPlausibility();
+    testJvmLanguageFamily();
+    testSeparationGoodVsBad();
+    testEmptyBuckets();
+    testNoDoubleCountingSynonyms();
+    testDomainProximityFloorForMissingSkills();
+    testProximityFloorRespectsClusterMatches();
+    testProximityFloorScalesWithCoverage();
+
+    console.log('\n═══════════════════════════════════════════════════════════════');
+    console.log(`   RESULTS: ${passed} passed, ${failed} failed`);
+    console.log('═══════════════════════════════════════════════════════════════');
+    if (failed > 0) {
+        console.log('\nFailures:');
+        failures.forEach((f) => console.log(`  - ${f}`));
+        process.exit(1);
+    }
+}
+
+run();

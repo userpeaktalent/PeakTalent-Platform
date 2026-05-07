@@ -1,0 +1,274 @@
+@import "tailwindcss";
+
+@theme {
+    --font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
+    --font-heading: "Outfit", "Plus Jakarta Sans", system-ui, sans-serif;
+
+    /* PeakTalent brand scale — unifies the marketing #ff7a1a palette with the
+       app's orange-* usage. Prefer `brand-*` classes over `orange-*` going forward. */
+    --color-brand-50: #fff6ee;
+    --color-brand-100: #ffe8d1;
+    --color-brand-200: #ffd5aa;
+    --color-brand-300: #ffc48a;
+    --color-brand-400: #ffa35a;
+    --color-brand-500: #ff7a1a;
+    --color-brand-600: #ed6800;
+    --color-brand-700: #c45200;
+    --color-brand-800: #9a4100;
+    --color-brand-900: #7a3400;
+}
+
+html {
+    scroll-behavior: smooth;
+}
+
+.platform-shell h1[class*="text-4xl"] {
+    font-size: clamp(2rem, 3vw, 2.3rem);
+    line-height: 1.08;
+}
+
+.platform-shell h1[class*="text-3xl"],
+.platform-shell h2[class*="text-3xl"] {
+    font-size: clamp(1.7rem, 2.35vw, 1.9rem);
+    line-height: 1.1;
+}
+
+.platform-shell h2[class*="text-2xl"],
+.platform-shell h3[class*="text-2xl"] {
+    font-size: clamp(1.28rem, 1.85vw, 1.42rem);
+    line-height: 1.14;
+}
+
+.platform-shell h3[class*="text-xl"],
+.platform-shell p[class*="text-xl"],
+.platform-shell div[class*="text-xl"] {
+    font-size: 1.1rem;
+    line-height: 1.34;
+}
+
+.platform-shell section[class*="rounded-[30px]"][class*="p-6"],
+.platform-shell section[class*="rounded-[28px]"][class*="p-6"],
+.platform-shell div[class*="rounded-[30px]"][class*="p-6"],
+.platform-shell div[class*="rounded-[28px]"][class*="p-6"],
+.platform-shell article[class*="rounded-[30px]"][class*="p-6"],
+.platform-shell article[class*="rounded-[28px]"][class*="p-6"] {
+    padding: 1.25rem;
+    border-radius: 26px;
+}
+
+.platform-shell section[class*="rounded-2xl"][class*="p-6"],
+.platform-shell div[class*="rounded-2xl"][class*="p-6"],
+.platform-shell article[class*="rounded-2xl"][class*="p-6"] {
+    padding: 1.25rem;
+}
+
+.platform-shell button[class*="py-3"],
+.platform-shell a[class*="py-3"] {
+    padding-top: 0.7rem;
+    padding-bottom: 0.7rem;
+}
+
+.platform-shell input[class*="py-3"],
+.platform-shell textarea[class*="py-3"],
+.platform-shell select[class*="py-3"] {
+    padding-top: 0.7rem;
+    padding-bottom: 0.7rem;
+}
+
+.platform-shell button[class*="rounded-2xl"],
+.platform-shell a[class*="rounded-2xl"] {
+    border-radius: 1rem;
+}
+
+.marketing-shell {
+    font-family: "Plus Jakarta Sans", sans-serif;
+}
+
+.marketing-heading {
+    font-family: "Outfit", sans-serif;
+}
+
+.marketing-gradient-text {
+    background-image: linear-gradient(135deg, #ff7a1a, #ffb15c);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+
+.marketing-card {
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.08);
+}
+
+.marketing-card-glow {
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04), 0 12px 32px rgba(249, 115, 22, 0.16);
+}
+
+.marketing-mobile-panel {
+    max-height: 0;
+    opacity: 0;
+    overflow: hidden;
+    pointer-events: none;
+    transition: max-height 320ms ease, opacity 220ms ease;
+}
+
+.marketing-mobile-panel.is-open {
+    max-height: 420px;
+    opacity: 1;
+    pointer-events: auto;
+}
+
+@media (max-width: 640px) {
+    html,
+    body {
+        overflow-x: hidden;
+    }
+
+    .platform-shell h1[class*="text-4xl"] {
+        font-size: clamp(1.7rem, 7vw, 2rem);
+        line-height: 1.08;
+    }
+
+    .platform-shell h1[class*="text-3xl"],
+    .platform-shell h2[class*="text-3xl"] {
+        font-size: clamp(1.45rem, 6vw, 1.72rem);
+        line-height: 1.1;
+    }
+
+    .platform-shell h2[class*="text-2xl"],
+    .platform-shell h3[class*="text-2xl"] {
+        font-size: clamp(1.18rem, 5vw, 1.32rem);
+        line-height: 1.14;
+    }
+
+    .platform-shell h3[class*="text-xl"],
+    .platform-shell p[class*="text-xl"],
+    .platform-shell div[class*="text-xl"] {
+        font-size: 1rem;
+        line-height: 1.32;
+    }
+
+    .platform-shell section[class*="rounded-[30px]"][class*="p-6"],
+    .platform-shell section[class*="rounded-[28px]"][class*="p-6"],
+    .platform-shell div[class*="rounded-[30px]"][class*="p-6"],
+    .platform-shell div[class*="rounded-[28px]"][class*="p-6"],
+    .platform-shell article[class*="rounded-[30px]"][class*="p-6"],
+    .platform-shell article[class*="rounded-[28px]"][class*="p-6"] {
+        padding: 1rem;
+        border-radius: 22px;
+    }
+
+    .platform-shell section[class*="rounded-2xl"][class*="p-6"],
+    .platform-shell div[class*="rounded-2xl"][class*="p-6"],
+    .platform-shell article[class*="rounded-2xl"][class*="p-6"] {
+        padding: 1rem;
+    }
+}
+
+.marketing-reveal {
+    opacity: 0;
+    transition-duration: 720ms;
+    transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+    transition-property: opacity, transform, filter;
+    will-change: opacity, transform;
+}
+
+.marketing-reveal-up {
+    transform: translateY(24px);
+}
+
+.marketing-reveal-left {
+    transform: translateX(-28px);
+}
+
+.marketing-reveal-right {
+    transform: translateX(28px);
+}
+
+.marketing-reveal-zoom {
+    transform: translateY(16px) scale(0.96);
+    filter: blur(6px);
+}
+
+.marketing-reveal.is-visible {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+    filter: blur(0);
+}
+
+.marketing-hero-image {
+    animation: marketingHeroScale 1.8s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.marketing-orb {
+    animation: marketingFloat 10s ease-in-out infinite;
+}
+
+.marketing-orb-delayed {
+    animation: marketingFloat 12s ease-in-out infinite;
+    animation-delay: -3s;
+}
+
+.animate-candidate-cascade {
+    animation: candidateCascade 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes marketingHeroScale {
+    from {
+        transform: scale(1.08);
+        opacity: 0.82;
+    }
+
+    to {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+@keyframes marketingFloat {
+    0%,
+    100% {
+        transform: translate3d(0, 0, 0);
+    }
+
+    50% {
+        transform: translate3d(0, -18px, 0);
+    }
+}
+
+@keyframes candidateCascade {
+    from {
+        opacity: 0;
+        transform: translate3d(0, 12px, 0);
+    }
+
+    to {
+        opacity: 1;
+        transform: translate3d(0, 0, 0);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html {
+        scroll-behavior: auto;
+    }
+
+    .marketing-mobile-panel,
+    .marketing-reveal,
+    .marketing-hero-image,
+    .marketing-orb,
+    .marketing-orb-delayed,
+    .animate-candidate-cascade {
+        animation: none !important;
+        transition: none !important;
+    }
+
+    .marketing-reveal,
+    .marketing-reveal-up,
+    .marketing-reveal-left,
+    .marketing-reveal-right,
+    .marketing-reveal-zoom {
+        opacity: 1 !important;
+        transform: none !important;
+        filter: none !important;
+    }
+}

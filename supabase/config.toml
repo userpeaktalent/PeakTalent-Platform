@@ -1,0 +1,5 @@
+[functions.send-recruiter-interest-email]
+verify_jwt = false
+
+[functions.admin-supabase-usage]
+verify_jwt = false

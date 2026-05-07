@@ -1,0 +1,45 @@
+{
+  "name": "peaktalent",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --ext .ts,.tsx",
+    "format": "prettier --write \"**/*.{ts,tsx,json,css}\" --ignore-path .gitignore",
+    "test:ranking": ".\\node_modules\\.bin\\jiti .\\utils\\rankingTest.ts",
+    "test:ranking:audit": ".\\node_modules\\.bin\\jiti .\\utils\\rankingAudit.ts",
+    "test:ranking:semantic": ".\\node_modules\\.bin\\jiti .\\utils\\semanticPillarTest.ts",
+    "test:ranking:hard": ".\\node_modules\\.bin\\jiti .\\utils\\hardSkillsPillarTest.ts"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@supabase/supabase-js": "^2.91.0",
+    "country-state-city": "^3.2.1",
+    "mammoth": "^1.11.0",
+    "pdfjs-dist": "^5.4.530",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.12.0",
+    "sonner": "^2.0.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.2.0",
+    "@types/node": "^22.14.0",
+    "@typescript-eslint/eslint-plugin": "^8.58.1",
+    "@typescript-eslint/parser": "^8.58.1",
+    "@vitejs/plugin-react": "^5.0.0",
+    "autoprefixer": "^10.4.24",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "postcss": "^8.5.6",
+    "prettier": "^3.8.2",
+    "tailwindcss": "^4.2.0",
+    "terser": "^5.46.2",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}

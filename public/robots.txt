@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+Disallow: /platform
+Disallow: /auth
+Disallow: /recruiter-auth
+Disallow: /seeker
+Disallow: /recruiter
+Disallow: /admin
+
+Sitemap: https://www.peaktalent.it/sitemap.xml
