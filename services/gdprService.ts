@@ -44,11 +44,42 @@ export const deleteAiInterviewData = async (candidate: Pick<CandidateProfile, 'i
 
   if (chatError) throw chatError;
 
-  // Reset the ai_refined flag on the candidates row
+  // Reset AI refinement metadata inside candidates.content. The candidates table
+  // stores profile fields as JSON, not as top-level ai_refined columns.
+  let { data: candidateRow, error: candidateReadError } = await supabase
+    .from('candidates')
+    .select('id, content')
+    .eq('id', candidate.id)
+    .maybeSingle();
+
+  if (candidateReadError) throw candidateReadError;
+
+  if (!candidateRow && candidate.id !== profileId) {
+    const fallbackResult = await supabase
+      .from('candidates')
+      .select('id, content')
+      .eq('user_id', profileId)
+      .maybeSingle();
+
+    if (fallbackResult.error) throw fallbackResult.error;
+    candidateRow = fallbackResult.data;
+  }
+
+  if (!candidateRow?.id) {
+    throw new Error('Candidate profile could not be found while resetting AI refinement status.');
+  }
+
+  const nextContent = {
+    ...((candidateRow.content || {}) as CandidateProfile),
+    id: ((candidateRow.content || {}) as CandidateProfile).id || candidateRow.id,
+    ai_refined: false,
+    ai_refined_at: null,
+  };
+
   const { error: candidateError } = await supabase
     .from('candidates')
-    .update({ ai_refined: false, ai_refined_at: null })
-    .eq('id', candidate.id);
+    .update({ content: nextContent })
+    .eq('id', candidateRow.id);
 
   if (candidateError) throw candidateError;
 };
