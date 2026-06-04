@@ -1,0 +1,5 @@
+.env.local
+.vite-cache/
+node_modules/
+dist/
+.DS_Store
