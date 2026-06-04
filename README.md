@@ -144,3 +144,4 @@ Notes:
   - [Resend pricing](https://resend.com/pricing)
 
 hey hey
+Aggiornamento README per nuovo commit.
