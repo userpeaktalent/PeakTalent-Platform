@@ -1,8 +1,7 @@
 
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { JobProfile, CandidateProfile } from '../types';
 import { buildCandidateCanonicalText, buildJobCanonicalText } from '../utils/canonicalBuilders';
-import { getGeminiApiKey } from './envService';
+import { getGenerativeModel } from './geminiClient';
 
 // Use gemini-embedding-2-preview for advanced multimodal semantics.
 // We strictly require 3072 dimensions which leverages its Matryoshka Representation Learning (MRL).
@@ -46,14 +45,14 @@ export const getEmbedding = async (
 ): Promise<number[]> => {
   if (!text.trim()) return [];
 
-  const apiKey = getGeminiApiKey();
-  if (!apiKey) {
-    console.warn("Missing Embeddings API Key");
-    return [];
-  }
+  const purpose =
+    taskType === 'RETRIEVAL_DOCUMENT'
+      ? 'job_embedding_generation'
+      : taskType === 'RETRIEVAL_QUERY'
+        ? 'candidate_embedding_generation'
+        : 'semantic_embedding_generation';
 
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: EMBEDDING_MODEL_ID });
+  const model = getGenerativeModel({ model: EMBEDDING_MODEL_ID, purpose });
 
   const maxRetries = 3;
   let delay = 1000;
@@ -71,7 +70,7 @@ export const getEmbedding = async (
         content: { parts: [{ text }], role: 'user' },
         taskType,
         outputDimensionality: EMBEDDING_DIMS,
-      } as any);
+      });
       const embedding = result.embedding;
 
       if (!embedding || !embedding.values) {
@@ -85,7 +84,7 @@ export const getEmbedding = async (
       console.warn(`[Embedding] Attempt ${i + 1} failed. ${isLastAttempt ? 'Giving up.' : 'Retrying...'}`);
 
       if (isLastAttempt) {
-        // Fallback: plain call without advanced params (gemini-embedding-001 defaults to 3072 dims)
+        // Fallback: plain call without advanced params (model defaults to 3072 dims)
         try {
           const basicResult = await model.embedContent({
             content: { parts: [{ text }], role: 'user' },
@@ -120,6 +119,15 @@ export const attachEmbeddingMetadata = async <T extends JobProfile | CandidatePr
       : buildCandidateCanonicalText(profile as CandidateProfile);
 
     const newHash = await generateHash(canonicalText);
+
+    // Respect candidate opt-out of AI matching consent
+    if (type === 'candidate' && (profile as CandidateProfile).matching_consent === false) {
+      profile.embedding_vector = undefined;
+      profile.embedding_input_hash = undefined;
+      profile.embedding_model = undefined;
+      profile.embedding_version = undefined;
+      return profile;
+    }
 
     // Skip if nothing meaningful has changed
     const hasEmbedding = !!profile.embedding_vector && profile.embedding_vector.length > 0;

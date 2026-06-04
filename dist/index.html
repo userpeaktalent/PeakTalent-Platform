@@ -3,7 +3,11 @@
 
 <head>
   <meta charset="UTF-8" />
-  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+  <link rel="shortcut icon" href="/favicon-32x32.png" type="image/png" />
+  <link rel="manifest" href="/site.webmanifest" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PeakTalent | AI recruiting e ricerca talenti con curriculum digitale</title>
   <meta name="description" content="PeakTalent è la piattaforma AI per recruiting, screening candidati, ricerca talenti e curriculum digitale. Migliora la selezione con assessment tecnici, ranking trasparente e matching intelligente." />
@@ -11,6 +15,8 @@
   <meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
   <meta name="author" content="PeakTalent" />
   <meta name="application-name" content="PeakTalent" />
+  <meta name="apple-mobile-web-app-title" content="PeakTalent" />
+  <meta name="msapplication-TileColor" content="#ff7a1a" />
   <meta name="theme-color" content="#ff7a1a" />
   <meta name="keywords" content="PeakTalent, Peak Talent, peaktalent.it, AI recruiting, ricerca talenti, curriculum digitale, selezione candidati, screening candidati, talent matching, recruiting digitale" />
   <link rel="canonical" href="https://www.peaktalent.it/" />
@@ -21,22 +27,29 @@
   <meta property="og:title" content="PeakTalent | AI recruiting e ricerca talenti con curriculum digitale" />
   <meta property="og:description" content="Piattaforma AI per screening candidati, ricerca talenti e curriculum digitale con assessment tecnici, ranking trasparente e matching intelligente." />
   <meta property="og:url" content="https://www.peaktalent.it/" />
-  <meta property="og:image" content="https://www.peaktalent.it/marketing/hero-candidate.png" />
-  <meta property="og:image:alt" content="PeakTalent, piattaforma AI per recruiting e ricerca talenti." />
+  <meta property="og:image" content="https://www.peaktalent.it/peaktalent-app-icon-512.png" />
+  <meta property="og:image:secure_url" content="https://www.peaktalent.it/peaktalent-app-icon-512.png" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:width" content="512" />
+  <meta property="og:image:height" content="512" />
+  <meta property="og:image:alt" content="Logo PeakTalent." />
 
-  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:card" content="summary" />
   <meta name="twitter:title" content="PeakTalent | AI recruiting e ricerca talenti con curriculum digitale" />
   <meta name="twitter:description" content="Piattaforma AI per screening candidati, ricerca talenti e curriculum digitale con assessment tecnici e ranking trasparente." />
-  <meta name="twitter:image" content="https://www.peaktalent.it/marketing/hero-candidate.png" />
+  <meta name="twitter:image" content="https://www.peaktalent.it/peaktalent-app-icon-512.png" />
 
   <!-- Preconnect / DNS-prefetch to third-party origins the app will hit on first paint. -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="preconnect" href="https://generativelanguage.googleapis.com" crossorigin>
   <link rel="preconnect" href="https://xcqzhoietkrlwcczgjiu.supabase.co" crossorigin>
   <link rel="dns-prefetch" href="https://cdn.iubenda.com">
   <link rel="dns-prefetch" href="https://embeds.iubenda.com">
 
+  <!-- LCP image: hero background on the marketing page. Preloaded so the browser starts the request before parsing JS. -->
+  <link rel="preload" as="image" href="/marketing/why-us-photo.webp" fetchpriority="high" type="image/webp">
+
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap">
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
   <!-- Third-party consent/cookie widgets are deferred so they never block the main thread or first paint. -->
@@ -51,7 +64,7 @@
           "name": "PeakTalent",
           "alternateName": "Peak Talent",
           "url": "https://www.peaktalent.it/",
-          "logo": "https://www.peaktalent.it/icon.svg",
+          "logo": "https://www.peaktalent.it/peaktalent-app-icon-512.png",
           "email": "info@peaktalent.it"
         },
         {
@@ -73,15 +86,14 @@
       ]
     }
   </script>
-  <script type="module" crossorigin src="/assets/index-DbZ2IPMo.js"></script>
-  <link rel="modulepreload" crossorigin href="/assets/vendor-react-BDGngP3F.js">
-  <link rel="modulepreload" crossorigin href="/assets/vendor-CWGdxDY-.js">
-  <link rel="modulepreload" crossorigin href="/assets/vendor-react-dom-3rd5oew4.js">
-  <link rel="modulepreload" crossorigin href="/assets/vendor-sonner-BtOp26er.js">
-  <link rel="modulepreload" crossorigin href="/assets/vendor-gemini-BmbVBm8Q.js">
-  <link rel="modulepreload" crossorigin href="/assets/vendor-supabase-Cj1d7kz3.js">
-  <link rel="modulepreload" crossorigin href="/assets/vendor-router-BoJUV5Sh.js">
-  <link rel="stylesheet" crossorigin href="/assets/index-DkQE7gC4.css">
+  <script type="module" crossorigin src="/assets/index-DL659mtu.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/vendor-react-EDirLMtg.js">
+  <link rel="modulepreload" crossorigin href="/assets/vendor-DlbbUxRi.js">
+  <link rel="modulepreload" crossorigin href="/assets/vendor-react-dom-Ici1JFum.js">
+  <link rel="modulepreload" crossorigin href="/assets/vendor-sonner-Bmz7bvqk.js">
+  <link rel="modulepreload" crossorigin href="/assets/vendor-supabase-DdW_nGVT.js">
+  <link rel="modulepreload" crossorigin href="/assets/vendor-router-DGa7FJYy.js">
+  <link rel="stylesheet" crossorigin href="/assets/index-CbkjlDE7.css">
 </head>
 
 <body class="bg-slate-100 dark:bg-slate-950">

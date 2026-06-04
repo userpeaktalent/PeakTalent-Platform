@@ -3,6 +3,7 @@ import { supabase } from '../services/supabaseClient';
 import { updateSystemAdminProfile } from '../services/adminService';
 import { useAuth } from './AuthProvider';
 import { useLanguage } from './LanguageProvider';
+import PasskeySecurityPanel from './PasskeySecurityPanel';
 
 const UserIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clipRule="evenodd" /></svg>;
 const LockIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2V7a3 3 0 00-6 0v2h6z" clipRule="evenodd" /></svg>;
@@ -240,6 +241,8 @@ const AdminSettingsPage: React.FC<AdminSettingsPageProps> = ({
           >
             {isSavingPassword ? text('Updating password...', 'Aggiornamento password...') : text('Change Password', 'Cambia password')}
           </button>
+
+          <PasskeySecurityPanel />
         </div>
       </SectionCard>
     );

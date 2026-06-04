@@ -49,10 +49,10 @@ export const AI_TASK_META: Record<AITaskKey, AITaskMeta> = {
 // ─── Code-side Defaults ─────────────────────────────────────────────────────
 // Edit these to change the fallback model for every task.
 const CODE_DEFAULTS: Record<AITaskKey, string> = {
-    chat: 'gemini-2.5-flash',
-    profileSummary: 'gemini-2.5-flash',
-    jobSummary: 'gemini-2.5-flash',
-    fakeDataGen: 'gemini-2.5-flash',
+    chat: 'gemini-2.5-flash-lite',
+    profileSummary: 'gemini-2.5-flash-lite',
+    jobSummary: 'gemini-2.5-flash-lite',
+    fakeDataGen: 'gemini-2.5-flash-lite',
     embedding: 'models/gemini-embedding-2-preview',
 };
 

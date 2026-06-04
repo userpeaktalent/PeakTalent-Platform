@@ -11,9 +11,10 @@ import { SectorSelect } from './SectorSelect';
 import { getJobFunctionLabel, JobFunctionSelect, JOB_FUNCTIONS } from './JobFunctionSelect';
 import { ContractTypeSelect } from './ContractTypeSelect';
 import { MonthPicker } from './MonthPicker';
-import { EDUCATION_LEVELS } from '../utils/education';
+import { EDUCATION_LEVELS, getEducationLevelLabel, normalizeEducationEntries } from '../utils/education';
 import { SEEKER_SKILL_LEVELS, getSeekerSkillLevelValue } from '../utils/skills';
 import { useLanguage } from './LanguageProvider';
+import UniversityAutocomplete from './UniversityAutocomplete';
 
 // --- Helper Components ---
 
@@ -222,7 +223,6 @@ const CandidateForm: React.FC<CandidateFormProps> = ({
         personal_info: { first_name: '', last_name: '' },
         residence: { country: '' },
         contacts: { email: '', phone: '' },
-        education: [],
         experiences: [],
         certifications: [],
         languages: [],
@@ -232,7 +232,8 @@ const CandidateForm: React.FC<CandidateFormProps> = ({
         it_skills: [],
         soft_skills: [],
         preferences: { salary_eur: { min: 0, flexibility: false }, preferred_locations: [], remote: 'no_preference', desired_contract_types: [], industries: [], work_eligibility_countries: [] },
-        ...initialData
+        ...initialData,
+        education: normalizeEducationEntries(initialData.education),
     });
 
     useEffect(() => {
@@ -242,6 +243,7 @@ const CandidateForm: React.FC<CandidateFormProps> = ({
             personal_info: { ...prev.personal_info, ...initialData.personal_info },
             residence: { ...prev.residence, ...initialData.residence },
             contacts: { ...prev.contacts, ...initialData.contacts },
+            education: normalizeEducationEntries(initialData.education ?? prev.education),
             preferences: {
                 ...prev.preferences,
                 ...initialData.preferences,
@@ -281,8 +283,12 @@ const CandidateForm: React.FC<CandidateFormProps> = ({
                 }
             }));
         } else {
+            const localizedReset = name === 'summary_text'
+                ? { summary_text_it: undefined, summary_text_en: undefined }
+                : {};
             setProfile(prev => ({
                 ...prev,
+                ...localizedReset,
                 [name]: type === 'checkbox' ? (e.target as HTMLInputElement).checked : value
             }));
         }
@@ -320,7 +326,11 @@ const CandidateForm: React.FC<CandidateFormProps> = ({
             };
         } else {
             // @ts-ignore
-            updatedArray[index] = { ...updatedArray[index], [name]: value };
+            updatedArray[index] = {
+                ...updatedArray[index],
+                [name]: value,
+                ...(name === 'description' ? { description_it: undefined, description_en: undefined } : {}),
+            };
         }
 
         setProfile(p => ({ ...p, [section]: updatedArray }));
@@ -367,30 +377,48 @@ const CandidateForm: React.FC<CandidateFormProps> = ({
 
     const [validationError, setValidationError] = useState<string | null>(null);
 
-    const validateRequiredFields = (): string | null => {
-        if (!profile.personal_info?.first_name?.trim()) return text('Complete all required fields (*).', 'Compila tutti i campi obbligatori (*).');
-        if (!profile.personal_info?.last_name?.trim()) return text('Complete all required fields (*).', 'Compila tutti i campi obbligatori (*).');
-        if (!profile.residence?.country?.trim()) return text('Complete all required fields (*).', 'Compila tutti i campi obbligatori (*).');
-        if (!profile.contacts?.email?.trim()) return text('Complete all required fields (*).', 'Compila tutti i campi obbligatori (*).');
-        if (!profile.contacts?.phone?.trim()) return text('Complete all required fields (*).', 'Compila tutti i campi obbligatori (*).');
-        if (!profile.job_search_status?.trim()) return text('Complete all required fields (*).', 'Compila tutti i campi obbligatori (*).');
-        for (const edu of profile.education || []) {
-            if (!edu.institution?.trim() || !edu.degree_level?.trim() || !edu.from?.trim())
-                return text('Complete all required fields in Education (*).', 'Compila tutti i campi obbligatori nella Formazione (*).');
+    const validateRequiredFields = (): { error: string | null; fieldId: string | null } => {
+        if (!profile.personal_info?.first_name?.trim()) return { error: text('Complete all required fields (*).', 'Compila tutti i campi obbligatori (*).'), fieldId: 'first_name' };
+        if (!profile.personal_info?.last_name?.trim()) return { error: text('Complete all required fields (*).', 'Compila tutti i campi obbligatori (*).'), fieldId: 'last_name' };
+        if (!profile.residence?.country?.trim()) return { error: text('Complete all required fields (*).', 'Compila tutti i campi obbligatori (*).'), fieldId: 'country' };
+        if (!profile.contacts?.email?.trim()) return { error: text('Complete all required fields (*).', 'Compila tutti i campi obbligatori (*).'), fieldId: 'email' };
+        if (!profile.contacts?.phone?.trim()) return { error: text('Complete all required fields (*).', 'Compila tutti i campi obbligatori (*).'), fieldId: 'phone' };
+        if (!profile.job_search_status?.trim()) return { error: text('Complete all required fields (*).', 'Compila tutti i campi obbligatori (*).'), fieldId: 'job_search_status' };
+        for (let i = 0; i < (profile.education || []).length; i++) {
+            const edu = profile.education![i];
+            if (!edu.institution?.trim()) return { error: text('Complete all required fields in Education (*).', 'Compila tutti i campi obbligatori nella Formazione (*).'), fieldId: `edu-institution-${i}` };
+            if (!edu.degree_level?.trim()) return { error: text('Complete all required fields in Education (*).', 'Compila tutti i campi obbligatori nella Formazione (*).'), fieldId: `edu-degree_level-${i}` };
+            if (!edu.from?.trim()) return { error: text('Complete all required fields in Education (*).', 'Compila tutti i campi obbligatori nella Formazione (*).'), fieldId: `edu-from-${i}` };
         }
-        for (const exp of profile.experiences || []) {
-            if (!exp.company?.trim() || !exp.role?.trim() || !exp.from?.trim())
-                return text('Complete all required fields in Work Experience (*).', 'Compila tutti i campi obbligatori nell\'Esperienza lavorativa (*).');
+        for (let i = 0; i < (profile.experiences || []).length; i++) {
+            const exp = profile.experiences![i];
+            if (!exp.company?.trim()) return { error: text('Complete all required fields in Work Experience (*).', "Compila tutti i campi obbligatori nell'Esperienza lavorativa (*)."), fieldId: `exp-company-${i}` };
+            if (!exp.role?.trim()) return { error: text('Complete all required fields in Work Experience (*).', "Compila tutti i campi obbligatori nell'Esperienza lavorativa (*)."), fieldId: `exp-role-${i}` };
+            if (!exp.from?.trim()) return { error: text('Complete all required fields in Work Experience (*).', "Compila tutti i campi obbligatori nell'Esperienza lavorativa (*)."), fieldId: `exp-from-${i}` };
         }
-        return null;
+        return { error: null, fieldId: null };
+    };
+
+    const scrollToAndHighlight = (fieldId: string) => {
+        const el = document.getElementById(fieldId);
+        if (!el) return;
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.focus({ preventScroll: true });
+        el.style.outline = '2px solid #ef4444';
+        el.style.outlineOffset = '2px';
+        setTimeout(() => { el.style.outline = ''; el.style.outlineOffset = ''; }, 2500);
     };
 
     const handleAction = (e: React.FormEvent, action: 'save' | 'refine') => {
         e.preventDefault();
-        const error = validateRequiredFields();
+        const { error, fieldId } = validateRequiredFields();
         if (error) {
             setValidationError(error);
-            window.scrollTo({ top: 0, behavior: 'smooth' });
+            if (fieldId) {
+                scrollToAndHighlight(fieldId);
+            } else {
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            }
             return;
         }
         setValidationError(null);
@@ -408,10 +436,9 @@ const CandidateForm: React.FC<CandidateFormProps> = ({
         <div className="space-y-8">
             <div className="p-6 border border-slate-200 dark:border-slate-700 rounded-xl">
                 <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100 mb-4 border-b pb-2 dark:border-slate-600">{text('Personal Details', 'Dati personali')}</h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <FormInput required label={text('First Name', 'Nome')} id="first_name" name="personal_info.first_name" value={profile.personal_info?.first_name || ''} onChange={handleChange} />
                     <FormInput required label={text('Last Name', 'Cognome')} id="last_name" name="personal_info.last_name" value={profile.personal_info?.last_name || ''} onChange={handleChange} />
-                    <FormInput label={text('Pronoun', 'Pronome')} id="pronoun" name="personal_info.pronoun" value={profile.personal_info?.pronoun || ''} onChange={handleChange} placeholder={text('e.g., she/her', 'es. she/her')} />
                 </div>
                 <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100 mt-6 mb-4 border-b pb-2 dark:border-slate-600">{text('Residence', 'Residenza')}</h3>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -514,17 +541,31 @@ const CandidateForm: React.FC<CandidateFormProps> = ({
                     <div key={index} className="p-4 border rounded-md mb-4 relative bg-slate-50 dark:bg-slate-900/50">
                         <button type="button" onClick={() => removeArrayItem('education', index)} className="absolute top-2 right-2 text-red-500 hover:text-red-700">×</button>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <FormInput required label={text('Institution', 'Istituto')} id={`edu-institution-${index}`} name="institution" value={edu.institution} onChange={e => handleArrayChange(e, 'education', index)} />
-                            <FormSelect required label={text('Degree Level', 'Livello titolo')} id={`edu-degree_level-${index}`} name="degree_level" value={edu.degree_level} onChange={e => handleArrayChange(e, 'education', index)}>
-                                <option value="">{text('Select Degree...', 'Seleziona titolo...')}</option>
+                            <UniversityAutocomplete
+                                required
+                                label={text('Institution', 'Istituto')}
+                                id={`edu-institution-${index}`}
+                                name="institution"
+                                value={edu.institution}
+                                placeholder={text('Search or type the institution name', "Cerca o scrivi il nome dell'istituto")}
+                                loadingLabel={text('Searching universities...', 'Ricerca universita in corso...')}
+                                emptyLabel={text('No match found. You can keep the name you typed.', 'Nessun risultato. Puoi lasciare il nome inserito.')}
+                                helperLabel={text('Suggestions come from OpenAlex. Free text is always accepted.', 'I suggerimenti arrivano da OpenAlex. Il testo libero resta sempre accettato.')}
+                                onChange={e => handleArrayChange(e, 'education', index)}
+                            />
+                            <FormSelect required label={text('Education level', 'Livello di istruzione')} id={`edu-degree_level-${index}`} name="degree_level" value={edu.degree_level} onChange={e => handleArrayChange(e, 'education', index)}>
+                                <option value="">{text('Select level...', 'Seleziona livello...')}</option>
                                 {EDUCATION_LEVELS.map(level => (
-                                    <option key={level.code} value={level.code}>{level.name}</option>
+                                    <option key={level.code} value={level.code}>{getEducationLevelLabel(level.code, language)}</option>
                                 ))}
                             </FormSelect>
                             <MajorSelect label={text('Major', 'Corso di studi')} id={`edu-major-${index}`} name="major" value={edu.major} onChange={e => handleArrayChange(e as any, 'education', index)} />
                             <FormInput label={text('Specialization (Optional)', 'Specializzazione (opzionale)')} id={`edu-specialization-${index}`} name="specialization" value={edu.specialization || ''} onChange={e => handleArrayChange(e, 'education', index)} />
                             <MonthPicker required label={text('Start Date', 'Data inizio')} id={`edu-from-${index}`} name="from" value={edu.from} onChange={e => handleArrayChange(e as any, 'education', index)} />
                             <MonthPicker label={text('End Date', 'Data fine')} id={`edu-to-${index}`} name="to" value={edu.to} onChange={e => handleArrayChange(e as any, 'education', index)} allowPresent />
+                        </div>
+                        <div className="mt-4">
+                            <FormTextarea label={text('Description', 'Descrizione')} id={`edu-description-${index}`} name="description" value={edu.description || ''} onChange={e => handleArrayChange(e as any, 'education', index)} rows={3} placeholder={text('Courses, thesis, projects, academic focus...', 'Corsi, tesi, progetti, focus accademico...')} />
                         </div>
                     </div>
                 ))}
@@ -601,17 +642,22 @@ const CandidateForm: React.FC<CandidateFormProps> = ({
 
                 <h3 className="text-md font-semibold text-slate-800 dark:text-slate-100 mt-6 mb-2 border-t pt-4 dark:border-slate-600">{text('Languages', 'Lingue')}</h3>
                 {profile.languages?.map((lang, index) => (
-                    <div key={index} className="flex items-end gap-4 mb-4 bg-slate-50 dark:bg-slate-800 p-4 rounded-lg">
-                        <LanguageSelect
-                            label={text('Language', 'Lingua')}
-                            id={`lang-language-${index}`}
-                            value={lang.language}
-                            onChange={(e: any) => handleArrayChange(e, 'languages', index)}
-                        />
-                        <FormSelect label={text('Level', 'Livello')} id={`lang-level-${index}`} name="level" value={lang.level} onChange={e => handleArrayChange(e, 'languages', index)}>
+                    <div key={index} className="mb-4 flex flex-col gap-3 rounded-lg bg-slate-50 p-4 dark:bg-slate-800 md:flex-row md:items-end md:gap-4">
+                        <div className="w-full md:flex-1">
+                            <LanguageSelect
+                                label={text('Language', 'Lingua')}
+                                id={`lang-language-${index}`}
+                                name="language"
+                                value={lang.language}
+                                onChange={(e: any) => handleArrayChange(e, 'languages', index)}
+                            />
+                        </div>
+                        <div className="w-full md:w-[160px] md:flex-none">
+                            <FormSelect label={text('Level', 'Livello')} id={`lang-level-${index}`} name="level" value={lang.level} onChange={e => handleArrayChange(e, 'languages', index)}>
                             {['A1', 'A2', 'B1', 'B2', 'C1', 'C2'].map(l => <option key={l} value={l}>{l}</option>)}
-                        </FormSelect>
-                        <button type="button" onClick={() => removeArrayItem('languages', index)} className="text-red-500 hover:text-red-700 font-bold text-xl mb-2">×</button>
+                            </FormSelect>
+                        </div>
+                        <button type="button" onClick={() => removeArrayItem('languages', index)} className="self-end text-xl font-bold text-red-500 hover:text-red-700 md:mb-2">×</button>
                     </div>
                 ))}
                 <button type="button" onClick={() => addArrayItem('languages', NEW_LANGUAGE_DEFAULT)} className="text-sm text-orange-600 hover:underline">+ {text('Add Language', 'Aggiungi lingua')}</button>
@@ -682,7 +728,7 @@ const CandidateForm: React.FC<CandidateFormProps> = ({
                     type="button"
                     onClick={(e) => handleAction(e, 'save')}
                     disabled={isSaving}
-                    className="w-full sm:w-auto min-w-[200px] bg-slate-800 dark:bg-slate-700 text-white font-bold py-3 px-8 rounded-xl shadow-lg hover:bg-slate-900 dark:hover:bg-slate-600 transition-all active:scale-95 disabled:opacity-50"
+                    className="w-full sm:w-auto min-w-[200px] bg-slate-800 dark:bg-slate-700 text-white font-bold py-3 px-8 rounded-xl shadow-lg hover:bg-slate-900 dark:hover:bg-slate-600 transition-all disabled:opacity-50"
                 >
                     {isSaving ? text('Saving...', 'Salvataggio...') : resolvedSaveLabel}
                 </button>
@@ -697,7 +743,7 @@ const CandidateForm: React.FC<CandidateFormProps> = ({
                         type="button"
                         onClick={(e) => handleAction(e, 'refine')}
                         disabled={isSaving}
-                        className="w-full sm:w-auto min-w-[200px] bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-3 px-8 rounded-xl shadow-lg hover:shadow-xl hover:-translate-y-0.5 transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
+                        className="w-full sm:w-auto min-w-[200px] bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-3 px-8 rounded-xl shadow-lg hover:shadow-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50"
                     >
                         <span>{resolvedRefineLabel}</span>
                     </button>

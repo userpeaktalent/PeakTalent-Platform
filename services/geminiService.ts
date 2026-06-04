@@ -1,26 +1,11 @@
 
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { JOB_PROFILE_SCHEMA, CANDIDATE_PROFILE_SCHEMA_CV, CANDIDATE_PROFILE_SCHEMA_FINAL } from '../constants';
 import { JobProfile, CandidateProfile, ChatMessage, QuizQuestion, TechnicalTest } from '../types';
 import { attachEmbeddingMetadata } from './embeddingService';
 import { getModel } from '../config/aiModels';
-import { getGeminiApiKey } from './envService';
-
-let ai: GoogleGenerativeAI;
-let aiKey = '';
-
-const getAI = () => {
-  const apiKey = getGeminiApiKey();
-
-  if (!apiKey) {
-    throw new Error('Gemini API key is missing from the Vite environment.');
-  }
-  if (!ai || aiKey !== apiKey) {
-    ai = new GoogleGenerativeAI(apiKey);
-    aiKey = apiKey;
-  }
-  return ai;
-};
+import { GeminiProxyError, getGenerativeModel, generateContentRaw, type GeminiContent } from './geminiClient';
+import { readFileAsText, renderPdfPagesAsImages } from '../utils/fileReader';
+import { supabase } from './supabaseClient';
 
 const generateUUID = (): string => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -42,6 +27,32 @@ export const cleanJson = (text: string | undefined): string => {
   if (match) clean = match[1];
   return clean.trim();
 };
+
+const buildCvExtractionPrompt = (cvSource: string) => `Extract ONE structured Candidate Profile JSON from the provided CV Text.
+    
+    SCHEMA: ${JSON.stringify(CANDIDATE_PROFILE_SCHEMA_CV, null, 2)}
+
+    CRITICAL INSTRUCTIONS:
+    1. 'id': Generate 'cand_' + random suffix.
+    2. 'experiences': Extract ALL roles. 
+       - 'is_current_position': True if no end date or "Present".
+       - 'description': Summarize key achievements.
+       - Also provide 'description_it' and 'description_en' with the same meaning in Italian and English.
+    3. 'skills' (Technical Domain): Extract core competencies (e.g. Project Management, Circuit Design).
+        - 'level': Infer level from these options: 2=Novice, 4=Competent, 6=Proficient, 8=Expert, 10=Master / Leading SME. Use even numbers for levels; odd numbers can be used for intermediate states.
+       - 'rank': Order by how central the skill is to the candidate's professional identity and the bulk of their work experience. A skill they have exercised across multiple roles, or that defines their primary job title, ranks highest. Skills mentioned only in passing or in a bare list rank lowest.
+       - 'level_source': Always set to "cv_only".
+       - 'level_confidence': CRITICAL — assess how certain you are about the assigned level:
+         * "high" = skill described with depth indicators: metrics, years of use, team size, project outcomes, certifications
+         * "medium" = skill mentioned in job role descriptions but without specific depth evidence
+         * "low" = skill only appears in a bare list (e.g. "Skills: Python, Java, SQL") with NO context in the experiences
+    4. 'it_skills' (Software/Code): Extract tools, languages, software. Rank by how frequently and centrally the tool appears in the candidate's actual work experience — tools actively used in described projects rank first, tools only listed in a skills section without any contextual use rank last. Apply same level_source and level_confidence rules.
+    5. 'education': Extract all degrees. If you summarize what the candidate studied or did there, provide 'description', 'description_it', and 'description_en'.
+    6. 'residence': Infer Country and City.
+    7. 'industry_experience': Infer the industries/sectors the candidate has ACTUALLY worked in based on their experiences (e.g. "FinTech", "SaaS", "Automotive", "Healthcare"). This is different from aspirational preferences.
+    8. Generate 'summary_text', 'summary_text_it', and 'summary_text_en'. The Italian and English versions must contain the same facts and level of detail.
+    
+    CV TEXT: ${cvSource}`;
 
 /** Thrown when a Gemini call is cancelled via an AbortSignal (e.g. component unmount). */
 export class GeminiAbortError extends Error {
@@ -120,6 +131,81 @@ function assertPartialCandidateProfile(data: unknown, context: string): asserts 
   if (!isObject(data)) throw new Error(`[${context}] Expected object, got ${typeof data}`);
 }
 
+// ── CV output sanitization ────────────────────────────────────────────────────
+// Allowed top-level keys on a parsed CV profile (mirrors CandidateProfile).
+const CV_ALLOWED_KEYS = new Set([
+  'id', 'personal_info', 'residence', 'contacts', 'current_job_function',
+  'current_seniority_level', 'target_job_functions', 'industry_experience',
+  'total_years_experience', 'notice_period_months', 'job_search_status',
+  'skills', 'it_skills', 'soft_skills', 'languages', 'certifications',
+  'preferences', 'summary_text', 'summary_text_it', 'summary_text_en', 'canonical_career_text', 'experiences',
+  'education', 'profile_visibility', 'terms_and_conditions_accepted',
+  'ai_refined', 'ai_refined_at', 'test_results', 'embedding_vector',
+  'embedding_model', 'embedding_generated_at',
+]);
+
+// GDPR Art. 9 special-category field names — strip wherever they appear.
+const SENSITIVE_FIELD_NAMES = new Set([
+  'pronoun', 'photo', 'photo_url', 'avatar', 'image',
+  'date_of_birth', 'birth_date', 'dob', 'age',
+  'gender', 'sex',
+  'marital_status', 'civil_status', 'relationship_status',
+  'nationality', 'citizenship',
+  'disability', 'health', 'health_status', 'medical',
+  'religion', 'faith',
+  'ethnicity', 'race', 'ethnic_origin',
+  'criminal_record', 'criminal_history',
+  'political_views', 'political_opinion',
+]);
+
+function stripSensitiveKeys(obj: unknown): unknown {
+  if (Array.isArray(obj)) return obj.map(stripSensitiveKeys);
+  if (!isObject(obj)) return obj;
+  const cleaned: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (!SENSITIVE_FIELD_NAMES.has(k.toLowerCase())) {
+      cleaned[k] = stripSensitiveKeys(v);
+    }
+  }
+  return cleaned;
+}
+
+function sanitizeExtractedProfile(raw: Partial<CandidateProfile>): Partial<CandidateProfile> {
+  // 1. Remove top-level keys not in the whitelist
+  const whitelisted: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (CV_ALLOWED_KEYS.has(k)) whitelisted[k] = v;
+  }
+  // 2. Recursively strip GDPR special-category fields from all nested objects
+  return stripSensitiveKeys(whitelisted) as Partial<CandidateProfile>;
+}
+
+// ── CV parse audit log ────────────────────────────────────────────────────────
+const CV_PARSE_PROMPT_VERSION = 'v1'; // bump when buildCvExtractionPrompt changes significantly
+
+async function logCvParse(params: {
+  inputCharCount: number;
+  outputFieldNames: string[];
+  modelId: string;
+  success: boolean;
+  errorMessage?: string;
+}): Promise<void> {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    await supabase.from('cv_parse_logs').insert({
+      profile_id: user?.id ?? null,
+      input_char_count: params.inputCharCount,
+      output_field_names: params.outputFieldNames,
+      model_id: params.modelId,
+      prompt_version: CV_PARSE_PROMPT_VERSION,
+      success: params.success,
+      error_message: params.errorMessage ?? null,
+    });
+  } catch {
+    // Non-fatal — never block the user flow for a logging failure
+  }
+}
+
 function assertTechnicalTest(data: unknown, context: string): asserts data is TechnicalTest {
   if (!isObject(data)) throw new Error(`[${context}] Expected object, got ${typeof data}`);
   if (!Array.isArray(data.questions)) throw new Error(`[${context}] Field 'questions' must be an array`);
@@ -184,7 +270,56 @@ const isRetryableGeminiError = (error: unknown): boolean => {
     lower.includes('unavailable') ||
     lower.includes('overloaded') ||
     lower.includes('[429') ||
+    lower.includes(' 429 ') ||
+    lower.includes('rate limit') ||
+    lower.includes('quota') ||
     lower.includes('resource_exhausted');
+};
+
+const parseRetryDelayMsFromMessage = (message: string): number | undefined => {
+  const retryMatch = message.match(/retry\s+in\s+([0-9.]+)\s*(ms|s|sec|seconds)?/i);
+  if (!retryMatch) return undefined;
+
+  const amount = Number(retryMatch[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return undefined;
+
+  const unit = (retryMatch[2] || 's').toLowerCase();
+  const milliseconds = unit === 'ms' ? amount : amount * 1000;
+  return Math.ceil(milliseconds);
+};
+
+const getGeminiRetryDelayMs = (error: unknown, attempt: number): number => {
+  if (error instanceof GeminiProxyError && error.retryAfterMs) {
+    return Math.min(60_000, Math.max(30_000, error.retryAfterMs));
+  }
+
+  const message = error instanceof Error ? error.message : String(error || '');
+  const lower = message.toLowerCase();
+  const parsedDelay = parseRetryDelayMsFromMessage(message);
+
+  if (
+    (error instanceof GeminiProxyError && error.status === 429) ||
+    lower.includes('[429') ||
+    lower.includes(' 429 ') ||
+    lower.includes('resource_exhausted') ||
+    lower.includes('rate limit') ||
+    lower.includes('quota')
+  ) {
+    return Math.min(60_000, Math.max(30_000, parsedDelay || 30_000));
+  }
+
+  if (
+    (error instanceof GeminiProxyError && error.status === 503) ||
+    lower.includes('[503') ||
+    lower.includes(' 503 ') ||
+    lower.includes('high demand') ||
+    lower.includes('unavailable') ||
+    lower.includes('overloaded')
+  ) {
+    return Math.min(30_000, Math.max(5_000, parsedDelay || 5_000 * (attempt + 1)));
+  }
+
+  return 1200 * (attempt + 1);
 };
 
 const getModelFallbacks = (modelId: string): string[] => {
@@ -209,10 +344,10 @@ const generateWithMetrics = async (
   /** Per-attempt timeout in ms. CV parsing needs more time than a quick chat reply. */
   timeoutMs: number = 60000,
   /** Optional AbortSignal so callers can cancel in-flight requests (unmount, navigation). */
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  purpose: string = 'general_generation'
 ): Promise<string> => {
   if (signal?.aborted) throw new GeminiAbortError();
-  const genAI = getAI();
   const preferredModelId = getModel('profileSummary');
 
   // Append strict JSON instruction since we can't use responseMimeType in older models safely
@@ -227,7 +362,7 @@ const generateWithMetrics = async (
     if (expectJson || schema) {
       modelConfig.generationConfig = { responseMimeType: "application/json" };
     }
-    const model = genAI.getGenerativeModel(modelConfig);
+    const model = getGenerativeModel({ ...modelConfig, purpose });
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if (signal?.aborted) throw new GeminiAbortError();
@@ -264,7 +399,7 @@ const generateWithMetrics = async (
 
         const isLastAttemptForModel = attempt === 2;
         if (!isLastAttemptForModel) {
-          await sleep(1200 * (attempt + 1), signal);
+          await sleep(getGeminiRetryDelayMs(error, attempt), signal);
         }
       }
     }
@@ -300,9 +435,83 @@ export const generateCanonicalCareerText = async (profile: Partial<CandidateProf
     undefined,
     false,
     60000,
-    signal
+    signal,
+    'canonical_career_generation'
   );
   return text;
+};
+
+export const translateProfessionalSummary = async (
+  summaryText: string,
+  targetLanguage: 'it' | 'en',
+  signal?: AbortSignal,
+): Promise<string> => {
+  const normalizedSummary = summaryText.trim();
+  if (!normalizedSummary) {
+    return '';
+  }
+
+  const targetLanguageLabel = targetLanguage === 'it' ? 'Italian' : 'English';
+  const translated = await generateWithMetrics(
+    `Translate the following professional candidate summary into ${targetLanguageLabel}.
+
+Rules:
+1. Preserve the original meaning, facts, tone, and level of detail.
+2. Keep it concise and natural, in 2-3 sentences.
+3. If the text is already in ${targetLanguageLabel}, lightly normalize it and return it in ${targetLanguageLabel}.
+4. Do not add information, headings, bullets, or explanations.
+5. Return only the translated summary text.
+
+SUMMARY:
+${normalizedSummary}`,
+    null,
+    undefined,
+    false,
+    30000,
+    signal,
+    `candidate_summary_translation_${targetLanguage}`
+  );
+
+  return translated.trim();
+};
+
+export const translateCandidateText = async (
+  sourceText: string,
+  targetLanguage: 'it' | 'en',
+  context: 'professional summary' | 'work experience description' | 'education description' = 'professional summary',
+  signal?: AbortSignal,
+): Promise<string> => {
+  const normalizedText = sourceText.trim();
+  if (!normalizedText) {
+    return '';
+  }
+
+  if (context === 'professional summary') {
+    return translateProfessionalSummary(normalizedText, targetLanguage, signal);
+  }
+
+  const targetLanguageLabel = targetLanguage === 'it' ? 'Italian' : 'English';
+  const translated = await generateWithMetrics(
+    `Translate the following candidate ${context} into ${targetLanguageLabel}.
+
+Rules:
+1. Preserve the original meaning, facts, dates, tools, names, and level of detail.
+2. Keep the text concise, natural, and professional.
+3. If the text is already in ${targetLanguageLabel}, lightly normalize it and return it in ${targetLanguageLabel}.
+4. Do not add information, headings, bullets, or explanations.
+5. Return only the translated text.
+
+TEXT:
+${normalizedText}`,
+    null,
+    undefined,
+    false,
+    30000,
+    signal,
+    `candidate_${context.replace(/\s+/g, '_')}_translation_${targetLanguage}`
+  );
+
+  return translated.trim();
 };
 
 export const summarizeJobDescription = async (description: string, language: 'it' | 'en' = 'en', signal?: AbortSignal): Promise<JobProfile> => {
@@ -336,7 +545,8 @@ export const summarizeJobDescription = async (description: string, language: 'it
     undefined,
     true,
     60000,
-    signal
+    signal,
+    'job_profile_generation'
   );
 
   const jsonString = cleanJson(text);
@@ -345,6 +555,7 @@ export const summarizeJobDescription = async (description: string, language: 'it
   const profile = {
     ...(parsed as any),
     title: (parsed as any).title || (parsed as any).role || '',
+    requires_quiz: false,
   } as JobProfile;
 
   // Force a valid UUID to prevent database insertion errors with 'job_...' format
@@ -355,179 +566,6 @@ export const summarizeJobDescription = async (description: string, language: 'it
   return await attachEmbeddingMetadata(profile, 'job');
 };
 
-const buildSkillAssessmentQuestion = (
-  job: JobProfile,
-  skillName: string,
-  index: number,
-  difficulty: number
-): QuizQuestion => ({
-  id: `generated_${job.id}_${index + 1}`,
-  text: `Quale opzione descrive meglio il tuo livello reale su ${skillName} per il ruolo ${job.title}?`,
-  options: [
-    `Non conosco ${skillName} e non l'ho mai usata direttamente.`,
-    `Conosco le basi di ${skillName}, ma su attività reali avrei ancora bisogno di supporto costante.`,
-    `Ho già usato ${skillName} in attività reali e so spiegare il flusso operativo principale e gli output.`,
-    `Ho usato ${skillName} in produzione più volte e so motivare decisioni, trade-off, troubleshooting e impatto.`,
-  ],
-  text_it: `Quale opzione descrive meglio il tuo livello reale su ${skillName} per il ruolo ${job.title}?`,
-  options_it: [
-    `Non conosco ${skillName} e non l'ho mai usata direttamente.`,
-    `Conosco le basi di ${skillName}, ma su attività reali avrei ancora bisogno di supporto costante.`,
-    `Ho già usato ${skillName} in attività reali e so spiegare il flusso operativo principale e gli output.`,
-    `Ho usato ${skillName} in produzione più volte e so motivare decisioni, trade-off, troubleshooting e impatto.`,
-  ],
-  text_en: `Which option best describes your real level with ${skillName} for the ${job.title} role?`,
-  options_en: [
-    `I do not know ${skillName} and have never used it directly.`,
-    `I know the basics of ${skillName}, but I would still need close support on real tasks.`,
-    `I have already used ${skillName} in real tasks and can explain the main workflow and outputs.`,
-    `I have used ${skillName} repeatedly in production and can explain decisions, trade-offs, troubleshooting, and impact.`,
-  ],
-  correct_option_index: 3,
-  difficulty,
-});
-
-const buildFallbackAssessmentQuestions = (job: JobProfile): TechnicalTest => {
-  const prioritySkills = [...(job.skills || []), ...(job.it_skills || [])]
-    .filter((skill, index, array) => array.findIndex((entry) => entry.skill_name.toLowerCase() === skill.skill_name.toLowerCase()) === index);
-
-  const questions: QuizQuestion[] = [];
-  const pushQuestion = (question: QuizQuestion) => {
-    if (questions.length < 20) {
-      questions.push(question);
-    }
-  };
-
-  if (job.experience_required) {
-    pushQuestion({
-      id: `generated_${job.id}_experience`,
-      text: `Quale opzione descrive meglio il tuo livello di esperienza pratica rispetto a quanto richiesto per ${job.title}?`,
-      options: [
-        'Non ho ancora esperienza diretta in questo tipo di ruolo.',
-        'Ho una prima esposizione, soprattutto tramite studio, osservazione o attività guidate.',
-        'Ho già gestito responsabilità simili in progetti reali con ownership parziale.',
-        'Ho esperienza pratica solida e posso guidare in autonomia responsabilità simili end-to-end.',
-      ],
-      text_it: `Quale opzione descrive meglio il tuo livello di esperienza pratica rispetto a quanto richiesto per ${job.title}?`,
-      options_it: [
-        'Non ho ancora esperienza diretta in questo tipo di ruolo.',
-        'Ho una prima esposizione, soprattutto tramite studio, osservazione o attività guidate.',
-        'Ho già gestito responsabilità simili in progetti reali con ownership parziale.',
-        'Ho esperienza pratica solida e posso guidare in autonomia responsabilità simili end-to-end.',
-      ],
-      text_en: `Which option best matches your hands-on experience level compared to what is required for the ${job.title} role?`,
-      options_en: [
-        'I have no direct experience in this type of role yet.',
-        'I have some exposure, mostly through study, observation, or guided tasks.',
-        'I have already handled similar responsibilities on real projects with partial ownership.',
-        'I have solid hands-on experience and can independently lead similar responsibilities end-to-end.',
-      ],
-      correct_option_index: 3,
-      difficulty: 4,
-    });
-  }
-
-  if (job.constraints?.min_education_level) {
-    pushQuestion({
-      id: `generated_${job.id}_education`,
-      text: `Quale affermazione descrive meglio il tuo livello di qualifiche rispetto ai requisiti per ${job.title}?`,
-      options: [
-        'Non raggiungo ancora il livello di qualifiche richiesto per questo ruolo.',
-        'Sto ancora costruendo il livello richiesto e avrei bisogno di supporto.',
-        'Raggiungo il livello richiesto e so collegarlo ad attività pratiche.',
-        'Supero il livello richiesto e l’ho già applicato direttamente in progetti rilevanti.',
-      ],
-      text_it: `Quale affermazione descrive meglio il tuo livello di qualifiche rispetto ai requisiti per ${job.title}?`,
-      options_it: [
-        'Non raggiungo ancora il livello di qualifiche richiesto per questo ruolo.',
-        'Sto ancora costruendo il livello richiesto e avrei bisogno di supporto.',
-        'Raggiungo il livello richiesto e so collegarlo ad attività pratiche.',
-        'Supero il livello richiesto e l’ho già applicato direttamente in progetti rilevanti.',
-      ],
-      text_en: `Which statement best describes your qualification level relative to the requirements for ${job.title}?`,
-      options_en: [
-        'I do not yet meet the requested qualification level for this role.',
-        'I am still building toward the requested qualification level and would need support.',
-        'I meet the requested qualification level and can connect it to practical work.',
-        'I exceed the requested qualification level and have already applied it directly in relevant projects.',
-      ],
-      correct_option_index: 3,
-      difficulty: 3,
-    });
-  }
-
-  prioritySkills.forEach((skill, index) => {
-    pushQuestion(
-      buildSkillAssessmentQuestion(
-        job,
-        skill.skill_name,
-        questions.length + index,
-        skill.must ? 4 : 3
-      )
-    );
-  });
-
-  const genericQuestionSeeds = [
-    `Quale opzione descrive meglio la tua capacità di gestire le responsabilità chiave previste per ${job.title}?`,
-    `Quanto ti senti solido nell’uso di workflow, metodi e strumenti principali richiesti da ${job.title}?`,
-    `Quale opzione descrive meglio la tua capacità di fare troubleshooting sui problemi tipici di ${job.title}?`,
-    `Quanto sei in grado di spiegare i trade-off dietro le scelte tecniche richieste in questo ruolo?`,
-    `Quale opzione descrive meglio la tua autonomia operativa sulle priorità di questa posizione?`,
-  ];
-  const genericQuestionSeedsEn = [
-    `Which option best reflects your ability to deliver the key responsibilities described for the ${job.title} role?`,
-    `How confident are you in using the main workflow, methods, and tools required for ${job.title}?`,
-    `Which option best describes your ability to troubleshoot issues related to the ${job.title} position?`,
-    `How well can you explain the trade-offs behind the technical choices required in this role?`,
-    `Which option best reflects your readiness to work independently on the priorities of this position?`,
-  ];
-
-  genericQuestionSeeds.forEach((seed, index) => {
-    pushQuestion({
-      id: `generated_${job.id}_generic_${index + 1}`,
-      text: seed,
-      options: [
-        'Avrei bisogno di un onboarding sostanziale prima di contribuire con sicurezza.',
-        'Potrei contribuire su task più semplici con supervisione ravvicinata.',
-        'Potrei gestire responsabilità normali con supporto limitato.',
-        'Potrei prendere ownership rapidamente e spiegare con chiarezza esecuzione e decisioni.',
-      ],
-      text_it: seed,
-      options_it: [
-        'Avrei bisogno di un onboarding sostanziale prima di contribuire con sicurezza.',
-        'Potrei contribuire su task più semplici con supervisione ravvicinata.',
-        'Potrei gestire responsabilità normali con supporto limitato.',
-        'Potrei prendere ownership rapidamente e spiegare con chiarezza esecuzione e decisioni.',
-      ],
-      text_en: genericQuestionSeedsEn[index],
-      options_en: [
-        'I would need substantial onboarding before contributing confidently.',
-        'I could contribute on simpler tasks with close supervision.',
-        'I could handle normal responsibilities with limited support.',
-        'I could take ownership quickly and explain both execution and decision-making clearly.',
-      ],
-      correct_option_index: 3,
-      difficulty: 3,
-    });
-  });
-
-  while (questions.length < 20) {
-    pushQuestion(
-      buildSkillAssessmentQuestion(
-        job,
-        `${job.title} core competency ${questions.length + 1}`,
-        questions.length,
-        3
-      )
-    );
-  }
-
-  return {
-    questions: questions.slice(0, 20),
-    generated_at: new Date().toISOString(),
-    generated_from_job_title: job.title,
-  };
-};
 
 const shuffleQuestionOptions = (question: QuizQuestion): QuizQuestion => {
   const order = [0, 1, 2, 3];
@@ -543,13 +581,68 @@ const shuffleQuestionOptions = (question: QuizQuestion): QuizQuestion => {
   };
 };
 
-export const generateTechnicalTestForJob = async (job: JobProfile, signal?: AbortSignal): Promise<TechnicalTest> => {
+export const rankCandidateSkills = async (
+  skills: CandidateProfile['skills'],
+  itSkills: CandidateProfile['it_skills'],
+  experiences: CandidateProfile['experiences'],
+  signal?: AbortSignal
+): Promise<{ skills: CandidateProfile['skills'], it_skills: CandidateProfile['it_skills'] }> => {
+  if (skills.length === 0 && itSkills.length === 0) {
+    return { skills, it_skills: itSkills };
+  }
+
+  const prompt = `Rank the candidate's skills by professional importance.
+
+CANDIDATE EXPERIENCES:
+${(experiences || []).map(e => `- ${e.role} at ${e.company} (${e.from} → ${e.to}): ${e.description || 'no description'}`).join('\n') || 'None provided'}
+
+TECHNICAL SKILLS TO RANK:
+${skills.map((s, i) => `${i + 1}. "${s.skill_name}" (level: ${s.level}/10)`).join('\n') || 'None'}
+
+IT/SOFTWARE SKILLS TO RANK:
+${itSkills.map((s, i) => `${i + 1}. "${s.skill_name}" (level: ${s.level}/10)`).join('\n') || 'None'}
+
+RANKING RULES:
+- Rank within each category independently (rank 1 = most important in that category).
+- A skill exercised across multiple roles, or that defines the primary job title, ranks highest.
+- Skills that appear only in a bare list with no evidence in the experiences rank lowest.
+- Higher claimed level is a secondary signal, but experience evidence takes priority.
+- All ranks must be unique integers starting from 1. No ties.
+
+Return ONLY this JSON (no markdown, no explanation):
+{
+  "skills": [{"skill_name": "...", "rank": 1}, ...],
+  "it_skills": [{"skill_name": "...", "rank": 1}, ...]
+}
+Every skill_name must exactly match the input list.`;
+
+  const raw = await generateWithMetrics(prompt, null, undefined, true, 30000, signal, 'candidate_skill_ranking');
+  const parsed = JSON.parse(cleanJson(raw));
+
+  const applyRanks = <T extends { skill_name: string; rank?: number }>(
+    original: T[],
+    ranked: { skill_name: string; rank: number }[]
+  ): T[] => {
+    const rankMap = new Map(ranked.map(r => [r.skill_name.toLowerCase().trim(), r.rank]));
+    return original.map(s => ({
+      ...s,
+      rank: rankMap.get(s.skill_name.toLowerCase().trim()) ?? s.rank,
+    }));
+  };
+
+  return {
+    skills: applyRanks(skills, parsed.skills || []),
+    it_skills: applyRanks(itSkills, parsed.it_skills || []),
+  };
+};
+
+export const generateTechnicalTestForJob = async (job: JobProfile, questionCount = 20, signal?: AbortSignal): Promise<TechnicalTest> => {
   try {
     const text = await generateWithMetrics(
       `Create a role-specific technical screening quiz. Every question must test actual knowledge — there must be one objectively correct answer that requires knowing the subject to identify correctly.
 
 GOAL:
-- Generate exactly 20 multiple-choice questions.
+- Generate exactly ${questionCount} multiple-choice questions.
 - Focus on the tools, technical concepts, workflows, and competencies explicitly required by the job profile.
 - Prioritize must-have skills. Distribute questions proportionally to skill importance (more questions on must-have, fewer on nice-to-have).
 - NEVER ask the candidate to self-rate their skill level. Ask questions they can only answer correctly if they genuinely know the subject.
@@ -600,14 +693,15 @@ ${JSON.stringify(job, null, 2)}`,
       undefined,
       true,
       90000,
-      signal
+      signal,
+      'technical_test_generation'
     );
 
     const parsedTest: unknown = JSON.parse(cleanJson(text));
     assertTechnicalTest(parsedTest, 'generateTechnicalTestForJob');
 
     const normalizedQuestions: QuizQuestion[] = ((parsedTest as { questions?: any[] }).questions || [])
-      .slice(0, 20)
+      .slice(0, questionCount)
       .map((question: any, index: number): QuizQuestion => ({
         id: String(question.id || `generated_${job.id}_${index + 1}`),
         text: String(question.text_it || question.text || ''),
@@ -632,43 +726,21 @@ ${JSON.stringify(job, null, 2)}`,
       )
       .map(shuffleQuestionOptions);
 
-    if (normalizedQuestions.length < 20) {
-      const fallbackQuestions = buildFallbackAssessmentQuestions(job).questions;
-      const questionTexts = new Set(normalizedQuestions.map((question) => question.text.toLowerCase().trim()));
-      const filledQuestions = [...normalizedQuestions];
-
-      for (const fallbackQuestion of fallbackQuestions) {
-        if (filledQuestions.length >= 20) break;
-        const normalizedText = fallbackQuestion.text.toLowerCase().trim();
-        if (questionTexts.has(normalizedText)) continue;
-        questionTexts.add(normalizedText);
-        filledQuestions.push({
-          ...fallbackQuestion,
-          id: `filled_${job.id}_${filledQuestions.length + 1}`,
-        });
-      }
-
-      if (filledQuestions.length < 10) {
-        throw new Error('The generated technical test was incomplete.');
-      }
-
-      return {
-        questions: filledQuestions.slice(0, 20),
-        generated_at: new Date().toISOString(),
-        generated_from_job_title: job.title,
-      };
+    if (normalizedQuestions.length < questionCount) {
+      throw new Error(
+        `Gemini returned only ${normalizedQuestions.length} valid questions out of ${questionCount} required. Please try again.`
+      );
     }
 
     return {
       questions: normalizedQuestions,
       generated_at: new Date().toISOString(),
       generated_from_job_title: job.title,
+      time_limit_seconds: questionCount * 60,
     };
   } catch (error) {
-    // Abort should bubble up immediately; only fall back on real Gemini failures.
     if (isAbortError(error)) throw error;
-    console.warn('Falling back to heuristic technical test generation:', error);
-    return buildFallbackAssessmentQuestions(job);
+    throw error;
   }
 };
 
@@ -716,7 +788,9 @@ OUTPUT: a single JSON object (not an array) matching this schema:
     null,
     undefined,
     true,
-    30000
+    30000,
+    undefined,
+    'single_question_regeneration'
   );
 
   const parsed = JSON.parse(cleanJson(text));
@@ -756,7 +830,7 @@ MERGE RULES:
 
 EXACT OUTPUT SCHEMA (return ONLY valid JSON, no markdown):
 {
-  "personal_info": { "first_name": string, "last_name": string, "pronoun": string },
+  "personal_info": { "first_name": string, "last_name": string },
   "residence": { "country": string (ISO 2-letter), "city": string },
   "contacts": { "email": string, "phone": string },
   "current_job_function": string (e.g. "software_engineering", "product_management"),
@@ -780,8 +854,10 @@ EXACT OUTPUT SCHEMA (return ONLY valid JSON, no markdown):
     "salary_eur": { "min": number, "flexibility": boolean }
   },
   "summary_text": string (2-3 sentence professional summary),
-  "experiences": [{ "role": string, "company": string, "location": { "country": string, "city": string }, "from": "YYYY-MM", "to": "YYYY-MM" or "present", "is_current_position": boolean, "description": string }],
-  "education": [{ "institution": string, "degree_level": string, "major": string, "from": "YYYY-MM", "to": "YYYY-MM", "currently_pursuing": boolean }]
+  "summary_text_it": string (Italian version of summary_text),
+  "summary_text_en": string (English version of summary_text),
+  "experiences": [{ "role": string, "company": string, "location": { "country": string, "city": string }, "from": "YYYY-MM", "to": "YYYY-MM" or "present", "is_current_position": boolean, "description": string, "description_it": string, "description_en": string }],
+  "education": [{ "institution": string, "degree_level": "PRIMARY"|"LOWER_SECONDARY"|"UPPER_SECONDARY"|"BACHELOR"|"ITS"|"MASTER"|"PHD", "major": string, "from": "YYYY-MM", "to": "YYYY-MM", "currently_pursuing": boolean, "description": string, "description_it": string, "description_en": string }]
 }
 
 EXISTING PROFILE DATA:
@@ -793,7 +869,8 @@ ${chatHistory || '(No chat interview conducted — use only existing data)'}`,
     undefined,
     true,
     120000, // Profile merge is a large prompt — allow up to 2 minutes
-    signal
+    signal,
+    'candidate_profile_merge'
   );
 
   const parsedCandidate: unknown = JSON.parse(cleanJson(text));
@@ -826,7 +903,7 @@ ${chatHistory || '(No chat interview conducted — use only existing data)'}`,
     profile.canonical_career_text = await generateCanonicalCareerText(profile, chatHistory, signal);
   }
 
-  return await attachEmbeddingMetadata(profile, 'candidate');
+  return profile;
 };
 
 /** Converts a Blob to a base64 string safely using FileReader (no stack overflow). */
@@ -861,22 +938,12 @@ const normalizeAudioMime = (raw: string): string => {
 
 export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
   const mimeType = normalizeAudioMime(audioBlob.type);
-  console.log(`[transcribeAudio] blob=${audioBlob.size}b, raw="${audioBlob.type}", normalized="${mimeType}"`);
-  const apiKey = getGeminiApiKey();
-
-  if (!apiKey) {
-    throw new Error('Gemini API key is missing from the Vite environment.');
-  }
 
   // Convert to base64 via FileReader — safe for any blob size
   const base64Audio = await blobToBase64(audioBlob);
-  console.log(`[transcribeAudio] base64 length=${base64Audio.length}`);
 
-  // Call Gemini REST API directly — gives us clear HTTP errors instead of SDK wrapping
   const modelId = getModel('chat');
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
-
-  const body = {
+  const json = await generateContentRaw(modelId, {
     contents: [
       {
         parts: [
@@ -892,25 +959,9 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
         ],
       },
     ],
-  };
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    const errBody = await response.text();
-    console.error(`[transcribeAudio] HTTP ${response.status}:`, errBody);
-    throw new Error(`Gemini ${response.status}: ${errBody}`);
-  }
-
-  const json = await response.json();
-  console.log('[transcribeAudio] response:', JSON.stringify(json).slice(0, 300));
+  }, undefined, 'audio_transcription');
 
   const transcript = json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? '';
-  console.log(`[transcribeAudio] transcript="${transcript}"`);
   return transcript;
 };
 
@@ -922,11 +973,14 @@ export const streamChatResponse = async (
   systemInstruction: string,
   onChunk: (chunk: string) => void
 ): Promise<void> => {
-  const genAI = getAI();
-
-  const model = genAI.getGenerativeModel({
+  const model = getGenerativeModel({
     model: getModel('chat'),
     systemInstruction: systemInstruction || undefined,
+    purpose: type === 'recruiter'
+      ? 'recruiter_chat'
+      : type === 'seeker'
+        ? 'seeker_chat'
+        : 'general_chat',
   });
 
   // Build history: exclude the current user message (last in array) since we send it via sendMessageStream
@@ -967,41 +1021,33 @@ export const streamChatResponse = async (
   });
 
   const result = await chat.sendMessageStream(newMessage);
+  let received = '';
   for await (const chunk of result.stream) {
-    onChunk(chunk.text());
+    const text = chunk.text();
+    if (text) {
+      received += text;
+      onChunk(text);
+    }
+  }
+
+  // If the stream closed without emitting any text, surface it as an error so
+  // the ChatWindow retry loop fires. Otherwise the user sees an empty bubble
+  // and the next turn includes an empty assistant message in history, which
+  // confuses the model into repeating the previous question.
+  if (!received) {
+    throw new Error('Gemini stream finished without producing any text.');
   }
 };
 
 export const extractCvInfo = async (cvText: string, signal?: AbortSignal): Promise<Partial<CandidateProfile>> => {
   const text = await generateWithMetrics(
-    `Extract ONE structured Candidate Profile JSON from the provided CV Text.
-    
-    SCHEMA: ${JSON.stringify(CANDIDATE_PROFILE_SCHEMA_CV, null, 2)}
-
-    CRITICAL INSTRUCTIONS:
-    1. 'id': Generate 'cand_' + random suffix.
-    2. 'experiences': Extract ALL roles. 
-       - 'is_current_position': True if no end date or "Present".
-       - 'description': Summarize key achievements.
-    3. 'skills' (Technical Domain): Extract core competencies (e.g. Project Management, Circuit Design). 
-        - 'level': Infer level from these options: 2=Novice, 4=Competent, 6=Proficient, 8=Expert, 10=Master / Leading SME. Use even numbers for levels; odd numbers can be used for intermediate states.
-       - 'rank': Order by relevance (1=most relevant).
-       - 'level_source': Always set to "cv_only".
-       - 'level_confidence': CRITICAL — assess how certain you are about the assigned level:
-         * "high" = skill described with depth indicators: metrics, years of use, team size, project outcomes, certifications
-         * "medium" = skill mentioned in job role descriptions but without specific depth evidence
-         * "low" = skill only appears in a bare list (e.g. "Skills: Python, Java, SQL") with NO context in the experiences
-    4. 'it_skills' (Software/Code): Extract tools, languages, software. Apply same level_source and level_confidence rules.
-    5. 'education': Extract all degrees.
-    6. 'residence': Infer Country and City.
-    7. 'industry_experience': Infer the industries/sectors the candidate has ACTUALLY worked in based on their experiences (e.g. "FinTech", "SaaS", "Automotive", "Healthcare"). This is different from aspirational preferences.
-    
-    CV TEXT: ${cvText}`,
+    buildCvExtractionPrompt(cvText),
     null,
     undefined,
     true,
     120000, // CV parsing sends a large prompt — allow up to 2 minutes
-    signal
+    signal,
+    'cv_text_extraction'
   );
   const parsedCv: unknown = JSON.parse(cleanJson(text));
   assertPartialCandidateProfile(parsedCv, 'extractCvInfo');
@@ -1013,6 +1059,246 @@ export const extractCvInfo = async (cvText: string, signal?: AbortSignal): Promi
   }
 
   return cvProfile;
+};
+
+const generateCvProfileFromPdf = async (file: File, signal?: AbortSignal): Promise<Partial<CandidateProfile>> => {
+  const base64Pdf = await blobToBase64(file);
+  const prompt = `${buildCvExtractionPrompt(
+    'Read the uploaded PDF CV directly, including selectable text, scanned text, visible layout content, and any embedded document attachments if available.'
+  )}\n\nIMPORTANT: Output ONLY valid JSON. No markdown, no explanations.`;
+  const preferredModelId = getModel('profileSummary');
+
+  let lastError: unknown;
+
+  for (const modelId of getModelFallbacks(preferredModelId)) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (signal?.aborted) throw new GeminiAbortError();
+
+      try {
+        const start = performance.now();
+        const json = await withTimeout(
+          generateContentRaw(modelId, {
+            generationConfig: {
+              responseMimeType: 'application/json',
+            },
+            contents: [
+              {
+                parts: [
+                  { text: prompt },
+                  {
+                    inline_data: {
+                      mime_type: file.type || 'application/pdf',
+                      data: base64Pdf,
+                    },
+                  },
+                ],
+              },
+            ],
+          }, signal, 'cv_pdf_extraction'),
+          180000,
+          `${modelId}-pdf-cv`,
+          signal
+        );
+        const end = performance.now();
+
+        const text = json?.candidates?.[0]?.content?.parts
+          ?.map((part) => (typeof part?.text === 'string' ? part.text : ''))
+          .join('\n')
+          .trim() || '';
+
+        if (!text) {
+          throw new Error('Gemini returned an empty response while reading the PDF CV.');
+        }
+
+        if (typeof window !== 'undefined') {
+          const event = new CustomEvent('gemini-usage', {
+            detail: {
+              model: modelId,
+              latency: Math.round(end - start),
+              tokens: json?.usageMetadata?.totalTokenCount || 0,
+              timestamp: new Date().toISOString(),
+            },
+          });
+          window.dispatchEvent(event);
+        }
+
+        const parsedCv: unknown = JSON.parse(cleanJson(text));
+        assertPartialCandidateProfile(parsedCv, 'extractCvInfoFromPdf');
+
+        const cvProfile = parsedCv as Partial<CandidateProfile>;
+        const computedExperienceYears = calculateTotalYearsExperienceFromExperiences(cvProfile.experiences);
+        if (computedExperienceYears !== undefined) {
+          cvProfile.total_years_experience = computedExperienceYears;
+        }
+
+        return cvProfile;
+      } catch (error) {
+        lastError = error;
+
+        if (isAbortError(error)) throw error;
+        if (!isRetryableGeminiError(error)) {
+          break;
+        }
+
+        if (attempt < 2) {
+          await sleep(getGeminiRetryDelayMs(error, attempt), signal);
+        }
+      }
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('Gemini could not read this PDF CV.');
+};
+
+const generateCvProfileFromPdfPageImages = async (file: File, signal?: AbortSignal): Promise<Partial<CandidateProfile>> => {
+  const imageBlobs = await renderPdfPagesAsImages(file, 3);
+  if (!imageBlobs.length) {
+    throw new Error('The PDF pages could not be rendered as images for Gemini vision fallback.');
+  }
+
+  const imageParts = await Promise.all(
+    imageBlobs.map(async (blob) => ({
+      inline_data: {
+        mime_type: blob.type || 'image/jpeg',
+        data: await blobToBase64(blob),
+      },
+    }))
+  );
+
+  const prompt = `${buildCvExtractionPrompt(
+    'Read the uploaded CV from rendered page images. Use OCR, visible layout, headings, tables, and text blocks to reconstruct the candidate profile as accurately as possible.'
+  )}\n\nIMPORTANT: Output ONLY valid JSON. No markdown, no explanations.`;
+  const preferredModelId = getModel('profileSummary');
+
+  let lastError: unknown;
+
+  for (const modelId of getModelFallbacks(preferredModelId)) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (signal?.aborted) throw new GeminiAbortError();
+
+      try {
+        const start = performance.now();
+        const json = await withTimeout(
+          generateContentRaw(modelId, {
+            generationConfig: {
+              responseMimeType: 'application/json',
+            },
+            contents: [
+              {
+                parts: [
+                  { text: prompt },
+                  ...imageParts,
+                ],
+              },
+            ],
+          }, signal, 'cv_pdf_vision_extraction'),
+          180000,
+          `${modelId}-pdf-cv-vision`,
+          signal
+        );
+        const end = performance.now();
+
+        const text = json?.candidates?.[0]?.content?.parts
+          ?.map((part) => (typeof part?.text === 'string' ? part.text : ''))
+          .join('\n')
+          .trim() || '';
+
+        if (!text) {
+          throw new Error('Gemini returned an empty response while reading the rendered PDF page images.');
+        }
+
+        if (typeof window !== 'undefined') {
+          const event = new CustomEvent('gemini-usage', {
+            detail: {
+              model: modelId,
+              latency: Math.round(end - start),
+              tokens: json?.usageMetadata?.totalTokenCount || 0,
+              timestamp: new Date().toISOString(),
+            },
+          });
+          window.dispatchEvent(event);
+        }
+
+        const parsedCv: unknown = JSON.parse(cleanJson(text));
+        assertPartialCandidateProfile(parsedCv, 'extractCvInfoFromPdfImages');
+
+        const cvProfile = parsedCv as Partial<CandidateProfile>;
+        const computedExperienceYears = calculateTotalYearsExperienceFromExperiences(cvProfile.experiences);
+        if (computedExperienceYears !== undefined) {
+          cvProfile.total_years_experience = computedExperienceYears;
+        }
+
+        return cvProfile;
+      } catch (error) {
+        lastError = error;
+
+        if (isAbortError(error)) throw error;
+        if (!isRetryableGeminiError(error)) {
+          break;
+        }
+
+        if (attempt < 2) {
+          await sleep(getGeminiRetryDelayMs(error, attempt), signal);
+        }
+      }
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('Gemini vision fallback could not read this PDF CV.');
+};
+
+export const extractCvInfoFromFile = async (file: File, signal?: AbortSignal): Promise<Partial<CandidateProfile>> => {
+  const inputCharCount = file.size; // bytes as proxy for char count (actual text length unknown before parsing)
+  let result: Partial<CandidateProfile> | null = null;
+
+  try {
+    try {
+      const cvText = await readFileAsText(file);
+      result = await extractCvInfo(cvText, signal);
+    } catch (error) {
+      const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+      if (!isPdf) throw error;
+
+      console.warn('Primary PDF extraction failed, retrying by sending the PDF directly to Gemini:', error);
+
+      try {
+        result = await generateCvProfileFromPdf(file, signal);
+      } catch (geminiPdfError) {
+        console.warn('Direct Gemini PDF CV extraction failed, retrying from rendered page images:', geminiPdfError);
+
+        try {
+          result = await generateCvProfileFromPdfPageImages(file, signal);
+        } catch (geminiVisionError) {
+          console.error('Gemini vision PDF CV extraction also failed:', geminiVisionError);
+          if (geminiVisionError instanceof Error) throw geminiVisionError;
+          if (geminiPdfError instanceof Error) throw geminiPdfError;
+          throw error;
+        }
+      }
+    }
+
+    const sanitized = sanitizeExtractedProfile(result!);
+    void logCvParse({
+      inputCharCount,
+      outputFieldNames: Object.keys(sanitized),
+      modelId: getModel('profileSummary'),
+      success: true,
+    });
+    return sanitized;
+  } catch (err) {
+    void logCvParse({
+      inputCharCount,
+      outputFieldNames: [],
+      modelId: getModel('profileSummary'),
+      success: false,
+      errorMessage: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
 };
 
 export const generateRefinedApplicationProfile = async (
@@ -1027,9 +1313,12 @@ export const generateRefinedApplicationProfile = async (
     Chat: ${chatHistory}`,
     null,
     undefined,
-    true
+    true,
+    60000,
+    undefined,
+    'job_application_profile_refinement'
   );
   const parsedRefined: unknown = JSON.parse(cleanJson(text));
   assertCandidateProfile(parsedRefined, 'generateRefinedApplicationProfile');
-  return await attachEmbeddingMetadata(parsedRefined, 'candidate');
+  return parsedRefined;
 }

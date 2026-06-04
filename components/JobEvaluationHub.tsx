@@ -4,6 +4,7 @@ import QuizTest from './QuizTest';
 import { addCandidate, markCandidateAssessmentCompleted } from '../services/dbService';
 import { AiBanner } from './common';
 import { useLanguage } from './LanguageProvider';
+import { getCurrentQuizResult, isJobQuizEnabled } from '../utils/questionnaire';
 
 interface JobEvaluationHubProps {
   job: JobProfile;
@@ -19,8 +20,9 @@ const buildEvaluationSteps = (
   text: (en: string, it: string) => string
 ): EvaluationStep[] => {
   const hasProfileRefinement = Boolean(candidate.ai_refined);
-  const hasQuizResult = Boolean(candidate.test_results?.some((result) => result.job_id === job.id));
+  const hasQuizResult = Boolean(getCurrentQuizResult(candidate, job));
   const questionCount = job.technical_test?.questions?.length || 10;
+  const quizRequired = isJobQuizEnabled(job);
 
   return [
     {
@@ -33,20 +35,16 @@ const buildEvaluationSteps = (
       ),
       status: hasProfileRefinement ? 'completed' : 'pending',
     },
-    {
+    ...(quizRequired ? ([{
       id: 'step_quiz',
-      type: 'quiz',
+      type: 'quiz' as const,
       title: text(`${job.title} role questionnaire`, `Questionario di ruolo ${job.title}`),
       description: text(
-        job.technical_test?.questions?.length
-          ? `A ${questionCount}-question multiple-choice questionnaire generated from this job posting to validate the required tools, qualifications, and role-specific competencies.`
-          : 'This role-specific questionnaire will appear here as soon as the recruiter requests it for you.',
-        job.technical_test?.questions?.length
-          ? `Un questionario a risposta multipla di ${questionCount} domande generato dal job posting per validare strumenti, qualifiche e competenze richieste dal ruolo.`
-          : 'Questo questionario specifico sul ruolo apparirà qui non appena il recruiter lo richiederà per te.'
+        `A ${questionCount}-question multiple-choice questionnaire generated from this job posting to validate the required tools, qualifications, and role-specific competencies.`,
+        `Un questionario a risposta multipla di ${questionCount} domande generato dal job posting per validare strumenti, qualifiche e competenze richieste dal ruolo.`
       ),
       status: hasQuizResult ? 'completed' : 'pending',
-    },
+    }] satisfies EvaluationStep[]) : []),
   ];
 };
 
@@ -59,7 +57,7 @@ const JobEvaluationHub: React.FC<JobEvaluationHubProps> = ({
 }) => {
   const { text } = useLanguage();
   const [activeStepId, setActiveStepId] = useState<string | null>(null);
-  const quizAvailable = Boolean(job.technical_test?.questions?.length);
+  const quizAvailable = isJobQuizEnabled(job);
   const steps = useMemo(() => buildEvaluationSteps(candidate, job, text), [candidate, job, text]);
 
   const activeStep = steps.find((step) => step.id === activeStepId) || null;
@@ -78,8 +76,9 @@ const JobEvaluationHub: React.FC<JobEvaluationHubProps> = ({
     setActiveStepId(null);
 
     try {
-      await addCandidate(updatedCandidate);
-      await markCandidateAssessmentCompleted(updatedCandidate, job.id);
+      const savedCandidate = await addCandidate(updatedCandidate);
+      onUpdateCandidate(savedCandidate);
+      await markCandidateAssessmentCompleted(savedCandidate, job.id);
     } catch (error) {
       console.error('Failed to persist quiz result:', error);
     }
@@ -95,6 +94,7 @@ const JobEvaluationHub: React.FC<JobEvaluationHubProps> = ({
           onComplete={handleQuizSubmit}
           onBack={() => setActiveStepId(null)}
           timeLimitSeconds={job.technical_test?.time_limit_seconds}
+          questionnaireGeneratedAt={job.technical_test?.generated_at}
         />
       </div>
     );

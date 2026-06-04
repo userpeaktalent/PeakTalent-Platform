@@ -7,7 +7,7 @@ import { CandidateProfile } from '../types';
 export const MOCK_CANDIDATES: CandidateProfile[] = [
   {
     id: 'cand_541',
-    personal_info: { first_name: 'John', last_name: 'Doe', pronoun: 'he/him' },
+    personal_info: { first_name: 'John', last_name: 'Doe' },
     residence: { country: 'it', city: 'milan', address: 'Via Roma 1' },
     contacts: { email: 'john.doe@email.com', phone: '+39123456789' },
     current_job_function: 'software_engineering',
@@ -64,7 +64,7 @@ export const MOCK_CANDIDATES: CandidateProfile[] = [
     education: [
       {
         institution: 'Polytechnic University of Milan',
-        degree_level: 'MSc',
+        degree_level: 'MASTER',
         major: 'CS',
         specialization: '',
         from: '2020-09',
@@ -79,7 +79,7 @@ export const MOCK_CANDIDATES: CandidateProfile[] = [
   },
   {
     id: 'cand_882',
-    personal_info: { first_name: 'Jane', last_name: 'Smith', pronoun: 'she/her' },
+    personal_info: { first_name: 'Jane', last_name: 'Smith' },
     residence: { country: 'it', city: 'milan' },
     contacts: { email: 'jane.smith@email.com', phone: '+39987654321' },
     current_job_function: 'software_engineering',
@@ -132,7 +132,7 @@ export const MOCK_CANDIDATES: CandidateProfile[] = [
     education: [
       {
         institution: 'University of Bologna',
-        degree_level: 'BA',
+        degree_level: 'BACHELOR',
         major: 'VisPerfArt',
         specialization: '',
         from: '2017-09',

@@ -1,0 +1,22 @@
+{
+  "name": "all-countries-and-cities-json",
+  "version": "1.0.0",
+  "description": "Countries and their largest cities json list",
+  "main": "countries.json",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/russ666/all-countries-and-cities-json.git"
+  },
+  "keywords": [
+    "countries",
+    "cities",
+    "json",
+    "database"
+  ],
+  "author": "Ruslan Orel",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/russ666/all-countries-and-cities-json/issues"
+  },
+  "homepage": "https://github.com/russ666/all-countries-and-cities-json#readme"
+}

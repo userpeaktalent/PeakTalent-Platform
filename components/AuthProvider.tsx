@@ -4,12 +4,19 @@ import { Session, User } from '@supabase/supabase-js';
 import { supabase } from '../services/supabaseClient';
 import { UserRole } from '../types';
 import { buildNormalizedFullName, normalizeFullName } from '../utils/nameFormat';
+import { clearPendingPasswordRecovery, markPendingPasswordRecovery } from '../services/passwordRecoveryService';
 import {
     AdminImpersonationSession,
     clearAdminImpersonation,
     loadAdminImpersonation,
     saveAdminImpersonation,
 } from '../services/impersonationService';
+import {
+    clearPasskeySecondFactorState,
+    isPasskeySecondFactorPendingForSession,
+    isPasskeySecondFactorSatisfied,
+    PASSKEY_SECOND_FACTOR_STATE_CHANGED_EVENT,
+} from '../services/passkeySecondFactorService';
 
 interface AuthContextType {
     session: Session | null;
@@ -19,6 +26,7 @@ interface AuthContextType {
     userRole: UserRole;
     profileName: string | null;
     effectiveUserRole: UserRole;
+    actualUserRole: UserRole;
     effectiveProfileId: string | null;
     effectiveDisplayName: string | null;
     effectiveEmail: string | null;
@@ -42,6 +50,7 @@ const AuthContext = createContext<AuthContextType>({
     userRole: null,
     profileName: null,
     effectiveUserRole: null,
+    actualUserRole: null,
     effectiveProfileId: null,
     effectiveDisplayName: null,
     effectiveEmail: null,
@@ -117,29 +126,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 }
 
                 if (!nextProfileName && nextRole === 'seeker') {
-                    const candidateQueries = [
+                    // Run both candidate lookups in parallel (one extra request worst case,
+                    // but halves the round-trip latency on login).
+                    const candidateResults = await Promise.all([
                         supabase.from('candidates').select('content').eq('user_id', userId).maybeSingle(),
                         supabase.from('candidates').select('content').eq('id', userId).maybeSingle(),
-                    ];
+                    ]);
 
-                    for (const candidateQuery of candidateQueries) {
-                        const { data: candidateData, error: candidateError } = await candidateQuery;
+                    const hit = candidateResults.find(({ data: d, error: e }) => !e && d?.content);
+                    if (hit?.data?.content) {
+                        const candidateContent = hit.data.content as { personal_info?: { first_name?: string; last_name?: string; }; };
+                        nextProfileName = buildNormalizedFullName(
+                            candidateContent.personal_info?.first_name,
+                            candidateContent.personal_info?.last_name
+                        ) || null;
 
-                        if (!candidateError && candidateData?.content) {
-                            const candidateContent = candidateData.content as { personal_info?: { first_name?: string; last_name?: string; }; };
-                            nextProfileName = buildNormalizedFullName(
-                                candidateContent.personal_info?.first_name,
-                                candidateContent.personal_info?.last_name
-                            ) || null;
-
-                            if (nextProfileName && !data.full_name) {
-                                await supabase
-                                    .from('profiles')
-                                    .update({ full_name: nextProfileName })
-                                    .eq('id', userId);
-                            }
-
-                            break;
+                        if (nextProfileName && !data.full_name) {
+                            await supabase
+                                .from('profiles')
+                                .update({ full_name: nextProfileName })
+                                .eq('id', userId);
                         }
                     }
                 }
@@ -162,11 +168,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const syncSession = async (nextSession: Session | null) => {
         setSession(nextSession);
-        setUser(nextSession?.user ?? null);
 
         if (nextSession?.user) {
+            if (isPasskeySecondFactorPendingForSession(nextSession.user.id)) {
+                setUser(null);
+                setUserRole(null);
+                setProfileName(null);
+                setLoading(false);
+                return;
+            }
+
+            if (!isPasskeySecondFactorSatisfied(nextSession.user.id)) {
+                try {
+                    const { data: passkeys, error } = await supabase.auth.passkey.list();
+                    if (!error && passkeys && passkeys.length > 0) {
+                        clearAuthState();
+                        await supabase.auth.signOut({ scope: 'local' });
+                        setLoading(false);
+                        return;
+                    }
+
+                    if (error) {
+                        console.warn('Unable to check passkey second-factor status. Continuing with the existing session:', error);
+                    }
+                } catch (error) {
+                    console.warn('Unable to check passkey second-factor status. Continuing with the existing session:', error);
+                }
+            }
+
+            setUser(nextSession.user);
             await fetchProfile(nextSession.user.id);
         } else {
+            setUser(null);
             setUserRole(null);
             setProfileName(null);
         }
@@ -182,8 +215,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // covers both the initial load and subsequent changes. We distinguish
         // the first event (full sync) from later events (silent refresh) so a
         // TOKEN_REFRESHED on tab focus does not remount the whole route tree.
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
             if (!isMounted) return;
+            if (event === 'PASSWORD_RECOVERY') {
+                markPendingPasswordRecovery();
+            }
             const nextUserId = nextSession?.user?.id ?? null;
 
             if (!initializedRef.current) {
@@ -214,6 +250,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }, []);
 
     useEffect(() => {
+        const handlePasskeySecondFactorStateChanged = () => {
+            void supabase.auth.getSession().then(({ data }) => {
+                void syncSession(data.session);
+            });
+        };
+
+        window.addEventListener(PASSKEY_SECOND_FACTOR_STATE_CHANGED_EVENT, handlePasskeySecondFactorStateChanged);
+        return () => {
+            window.removeEventListener(PASSKEY_SECOND_FACTOR_STATE_CHANGED_EVENT, handlePasskeySecondFactorStateChanged);
+        };
+    }, []);
+
+    useEffect(() => {
         if (!user || userRole !== 'admin') {
             if (impersonation) {
                 setImpersonation(null);
@@ -231,6 +280,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const signOut = async () => {
         clearPersistedSessionState();
         clearAuthState();
+        clearPendingPasswordRecovery();
+        clearPasskeySecondFactorState();
 
         try {
             await supabase.auth.signOut({ scope: 'local' });
@@ -285,6 +336,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 userRole,
                 profileName,
                 effectiveUserRole,
+                actualUserRole: userRole,
                 effectiveProfileId,
                 effectiveDisplayName,
                 effectiveEmail,

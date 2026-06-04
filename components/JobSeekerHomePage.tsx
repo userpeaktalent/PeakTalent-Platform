@@ -13,6 +13,8 @@ import {
     invalidateSeekerMatchCache,
     setSeekerMatchCache,
 } from '../utils/seekerMatchCache';
+import { withRetry } from '../utils/retry';
+import { hasCurrentQuizResult, isJobQuizEnabled } from '../utils/questionnaire';
 
 const SEEKER_DASHBOARD_SCROLL_STORAGE_KEY = 'peaktalent:seeker-dashboard-scroll-y';
 
@@ -79,7 +81,7 @@ const JobMatchCard: React.FC<{
     const companyLine = job.company_name || (Array.isArray(job.industry) ? job.industry.join(', ') : job.industry);
 
     return (
-        <div className="flex h-full flex-col justify-between rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-lg dark:border-slate-800 dark:bg-slate-950">
+        <div className="flex h-full flex-col justify-between rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition-all hover:shadow-lg dark:border-slate-800 dark:bg-slate-950">
             <div>
                 <div className="mb-4 flex items-start justify-between gap-3">
                     <span className={`inline-flex rounded-full px-3 py-1 text-[11px] font-semibold ${
@@ -101,6 +103,7 @@ const JobMatchCard: React.FC<{
                         companyName={job.company_name}
                         size="sm"
                         className="shrink-0"
+                        fullBleed
                     />
                     <div className="min-w-0">
                         <h3 className="text-xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">{job.title}</h3>
@@ -149,6 +152,7 @@ const JobMatchRow: React.FC<{
                     companyName={job.company_name}
                     size="sm"
                     className="shrink-0"
+                    fullBleed
                 />
 
                 <div className="min-w-0 flex-1">
@@ -178,7 +182,7 @@ const JobMatchRow: React.FC<{
                 </div>
 
                 <svg
-                    className="h-5 w-5 shrink-0 text-slate-300 transition-all group-hover:translate-x-0.5 group-hover:text-brand-500 dark:text-slate-600 dark:group-hover:text-brand-300"
+                    className="h-5 w-5 shrink-0 text-slate-300 transition-all group-hover:text-brand-500 dark:text-slate-600 dark:group-hover:text-brand-300"
                     viewBox="0 0 20 20"
                     fill="currentColor"
                     aria-hidden="true"
@@ -284,11 +288,13 @@ const ActiveJobRow: React.FC<{
     const companyLine = job.company_name || (Array.isArray(job.industry) ? job.industry.join(', ') : job.industry);
     const normalizedBadgeLabel = badgeLabel.toLowerCase();
     const badgeClassName =
-        normalizedBadgeLabel.includes('complete') || normalizedBadgeLabel.includes('complet')
+        normalizedBadgeLabel.includes('feedback') || normalizedBadgeLabel.includes('attesa') || normalizedBadgeLabel.includes('complete') || normalizedBadgeLabel.includes('complet')
             ? 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:ring-emerald-900'
             : normalizedBadgeLabel.includes('questionnaire') || normalizedBadgeLabel.includes('questionario')
                 ? 'bg-sky-50 text-sky-700 ring-sky-200 dark:bg-sky-950/40 dark:text-sky-300 dark:ring-sky-900'
-                : 'bg-slate-100 text-slate-700 ring-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700';
+                : normalizedBadgeLabel.includes('non selezionato') || normalizedBadgeLabel.includes('not selected')
+                    ? 'bg-rose-50 text-rose-600 ring-rose-200 dark:bg-rose-950/40 dark:text-rose-300 dark:ring-rose-900'
+                    : 'bg-slate-100 text-slate-700 ring-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700';
 
     return (
         <li>
@@ -303,6 +309,7 @@ const ActiveJobRow: React.FC<{
                         companyName={job.company_name}
                         size="sm"
                         className="shrink-0"
+                        fullBleed
                     />
                     <div className="min-w-0">
                         <h3 className="truncate text-base font-semibold text-slate-950 dark:text-slate-100">{job.title}</h3>
@@ -317,7 +324,7 @@ const ActiveJobRow: React.FC<{
                         {badgeLabel}
                     </span>
                     <svg
-                        className="h-5 w-5 shrink-0 text-slate-300 transition-all group-hover:translate-x-0.5 group-hover:text-orange-500 dark:text-slate-600 dark:group-hover:text-orange-300"
+                        className="h-5 w-5 shrink-0 text-slate-300 transition-all group-hover:text-orange-500 dark:text-slate-600 dark:group-hover:text-orange-300"
                         viewBox="0 0 20 20"
                         fill="currentColor"
                         aria-hidden="true"
@@ -346,6 +353,7 @@ const JobSeekerHomePage: React.FC<JobSeekerHomePageProps> = ({ setPage, candidat
     const [isScanning, setIsScanning] = useState(false);
     const [scanCompleteMessage, setScanCompleteMessage] = useState<string | null>(null);
     const [selectionInfoOpen, setSelectionInfoOpen] = useState(false);
+    const [showAllApplications, setShowAllApplications] = useState(false);
 
     const profileChecks = [
         { label: text('Name', 'Nome'), filled: !!(candidate.personal_info?.first_name && candidate.personal_info?.last_name) },
@@ -386,52 +394,67 @@ const JobSeekerHomePage: React.FC<JobSeekerHomePageProps> = ({ setPage, candidat
         }
 
         try {
-            const [allJobs, invitedJobFiles, nextAssessmentStatuses, nextNotifications] = await Promise.all([
-                getAllJobs(),
-                getJobsForCandidate(candidate.contacts.email, candidate.id),
-                getCandidateAssessmentStatuses(candidate.contacts.email, candidate.id).catch((error) => {
-                    console.error('Failed to load seeker assessment statuses for dashboard state:', error);
-                    return {};
-                }),
-                effectiveProfileId
-                    ? getNotifications(effectiveProfileId).catch((error) => {
-                        console.error('Failed to load seeker notifications for dashboard state:', error);
-                        return [];
-                    })
-                    : Promise.resolve([]),
-            ]);
-            const appliedJobIds = new Set(invitedJobFiles.map((job) => job.id));
-            const candidateJobs = allJobs.filter((job) => !appliedJobIds.has(job.id));
-            const visibleRecommendations = await recommendJobsForCandidate(candidate, candidateJobs, 12);
-            const invitedJobs = invitedJobFiles.map(job => ({
-                job,
-                score: calculateMatchScore(job, candidate).finalScore,
-                explanation: '',
-            }));
+            await withRetry(async () => {
+                // First wave: anything the recommendation worker depends on.
+                const [allJobs, invitedJobFiles] = await Promise.all([
+                    getAllJobs(),
+                    getJobsForCandidate(candidate.contacts.email, candidate.id),
+                ]);
 
-            const safeAssessmentStatuses: Record<string, string> = nextAssessmentStatuses && typeof nextAssessmentStatuses === 'object' && !Array.isArray(nextAssessmentStatuses)
-                ? nextAssessmentStatuses as Record<string, string>
-                : {};
-            const safeNotifications = Array.isArray(nextNotifications) ? nextNotifications : [];
-            setAssessmentStatuses(safeAssessmentStatuses);
-            setNotifications(safeNotifications);
-            setRecommendations(visibleRecommendations);
-            setInvitations(invitedJobs);
-            setSeekerMatchCache({
-                candidateId: candidate.id,
-                candidateSignature: candidateMatchSignature,
-                recommendations: visibleRecommendations,
-                invitations: invitedJobs,
-                notifications: safeNotifications,
-                assessmentStatuses: safeAssessmentStatuses,
+                const appliedJobIds = new Set(invitedJobFiles.map((job) => job.id));
+                const candidateJobs = allJobs.filter((job) => !appliedJobIds.has(job.id));
+
+                // Second wave: the (potentially slow) ranking runs in parallel
+                // with the two remaining Supabase queries instead of after them.
+                const [visibleRecommendations, nextAssessmentStatuses, nextNotifications] = await Promise.all([
+                    recommendJobsForCandidate(candidate, candidateJobs, 12),
+                    getCandidateAssessmentStatuses(candidate.contacts.email, candidate.id).catch((error) => {
+                        console.error('Failed to load seeker assessment statuses for dashboard state:', error);
+                        return {};
+                    }),
+                    effectiveProfileId
+                        ? getNotifications(effectiveProfileId).catch((error) => {
+                            console.error('Failed to load seeker notifications for dashboard state:', error);
+                            return [];
+                        })
+                        : Promise.resolve([]),
+                ]);
+                const invitedJobs = invitedJobFiles.map(job => ({
+                    job,
+                    score: calculateMatchScore(job, candidate).finalScore,
+                    explanation: '',
+                }));
+
+                const safeAssessmentStatuses: Record<string, string> = nextAssessmentStatuses && typeof nextAssessmentStatuses === 'object' && !Array.isArray(nextAssessmentStatuses)
+                    ? nextAssessmentStatuses as Record<string, string>
+                    : {};
+                const safeNotifications = Array.isArray(nextNotifications) ? nextNotifications : [];
+                setAssessmentStatuses(safeAssessmentStatuses);
+                setNotifications(safeNotifications);
+                setRecommendations(visibleRecommendations);
+                setInvitations(invitedJobs);
+                setSeekerMatchCache({
+                    candidateId: candidate.id,
+                    candidateSignature: candidateMatchSignature,
+                    recommendations: visibleRecommendations,
+                    invitations: invitedJobs,
+                    notifications: safeNotifications,
+                    assessmentStatuses: safeAssessmentStatuses,
+                });
+
+                if (showScanningUI) {
+                    setScanCompleteMessage(language === 'it'
+                        ? `Scansione completata. ${visibleRecommendations.length} job consigliati sono pronti da consultare.`
+                        : `Scan complete. ${visibleRecommendations.length} recommended jobs are ready for review.`);
+                    setTimeout(() => setScanCompleteMessage(null), 4000);
+                }
+            }, {
+                attempts: 3,
+                delaysMs: [0, 900, 2200],
+                onRetry: (error, attempt) => {
+                    console.warn(`Retrying seeker dashboard load for ${candidate.id} after failed attempt ${attempt}:`, error);
+                },
             });
-
-            if (showScanningUI) {
-                setScanCompleteMessage(language === 'it'
-                    ? `Scansione completata. ${visibleRecommendations.length} job consigliati sono pronti da consultare.`
-                    : `Scan complete. ${visibleRecommendations.length} recommended jobs are ready for review.`);
-                setTimeout(() => setScanCompleteMessage(null), 4000);
-            }
         } catch (e) {
             console.error(e);
         } finally {
@@ -500,24 +523,38 @@ const JobSeekerHomePage: React.FC<JobSeekerHomePageProps> = ({ setPage, candidat
         setPage('jobDetails', { job });
     };
 
-    const checkCompletion = (jobId: string) => {
-        return candidate.test_results?.some(r => r.job_id === jobId) || false;
-    };
+    const getAssessmentStatus = (job: JobProfile) => {
+        if (!isJobQuizEnabled(job)) {
+            return null;
+        }
 
-    const getAssessmentStatus = (jobId: string) => {
-        if (checkCompletion(jobId) || assessmentStatuses[jobId] === 'assessment_completed') {
+        if (hasCurrentQuizResult(candidate, job) || assessmentStatuses[job.id] === 'assessment_completed') {
             return 'assessment_completed';
         }
-        if (assessmentStatuses[jobId] === 'assessment_requested') {
+
+        if (assessmentStatuses[job.id] === 'assessment_requested') {
             return 'assessment_requested';
         }
+
+        const hasAppliedToJob = job.applicant_emails?.some((email) => email.toLowerCase().trim() === candidate.contacts.email.toLowerCase().trim());
+        if (hasAppliedToJob) {
+            return 'assessment_requested';
+        }
+
         return null;
     };
 
     const pendingQuestionnaires = useMemo(
-        () => invitations.filter((inv) => getAssessmentStatus(inv.job.id) === 'assessment_requested'),
-        // getAssessmentStatus reads from candidate.test_results and assessmentStatuses
-        [invitations, assessmentStatuses, candidate.test_results] // eslint-disable-line react-hooks/exhaustive-deps
+        () => invitations.filter((inv) => getAssessmentStatus(inv.job) === 'assessment_requested'),
+        [invitations, assessmentStatuses, candidate.test_results, candidate.contacts.email] // eslint-disable-line react-hooks/exhaustive-deps
+    );
+    const applicationsForDisplay = useMemo(
+        () => [...invitations].sort((a, b) => {
+            const aExcluded = a.job.candidate_interest_reviews?.[candidate.id]?.decision === 'not_interested';
+            const bExcluded = b.job.candidate_interest_reviews?.[candidate.id]?.decision === 'not_interested';
+            return Number(aExcluded) - Number(bExcluded);
+        }),
+        [invitations, candidate.id]
     );
 
     const dashboardProgressItems = [
@@ -569,17 +606,14 @@ const JobSeekerHomePage: React.FC<JobSeekerHomePageProps> = ({ setPage, candidat
                                                 `${pendingQuestionnaires.length} recruiter hanno richiesto un questionario`
                                             )}
                                     </h2>
-                                    <p className="mt-1 max-w-2xl text-sm leading-relaxed text-slate-600 dark:text-slate-300">
-                                        {candidate.ai_refined
-                                            ? text(
-                                                'Complete the role questionnaire so the recruiter can finalize your evaluation.',
-                                                'Completa il questionario del ruolo così il recruiter può finalizzare la tua valutazione.'
-                                            )
-                                            : text(
+                                    {!candidate.ai_refined && (
+                                        <p className="mt-1 max-w-2xl text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+                                            {text(
                                                 'Finish your AI profile refinement first, then complete the role questionnaire.',
                                                 'Completa prima il perfezionamento AI del profilo, poi il questionario del ruolo.'
                                             )}
-                                    </p>
+                                        </p>
+                                    )}
                                 </div>
                             </div>
                             <ul className="divide-y divide-sky-200/70 overflow-hidden rounded-2xl border border-sky-200 bg-white dark:divide-sky-900/40 dark:border-sky-900/40 dark:bg-slate-950">
@@ -591,6 +625,7 @@ const JobSeekerHomePage: React.FC<JobSeekerHomePageProps> = ({ setPage, candidat
                                                 companyName={inv.job.company_name}
                                                 size="sm"
                                                 className="shrink-0"
+                                                fullBleed
                                             />
                                             <div className="min-w-0">
                                                 <p className="truncate text-sm font-semibold text-slate-950 dark:text-slate-100">{inv.job.title}</p>
@@ -631,25 +666,35 @@ const JobSeekerHomePage: React.FC<JobSeekerHomePageProps> = ({ setPage, candidat
                                 )}
                             />
                             <ul className="divide-y divide-slate-200 overflow-hidden rounded-2xl border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-950">
-                                {invitations.map((inv) => {
-                                    const assessmentStatus = getAssessmentStatus(inv.job.id);
-                                    const assessmentComplete = assessmentStatus === 'assessment_completed';
+                                {(showAllApplications ? applicationsForDisplay : applicationsForDisplay.slice(0, 3)).map((inv) => {
+                                    const assessmentStatus = getAssessmentStatus(inv.job);
                                     const assessmentRequested = assessmentStatus === 'assessment_requested';
+                                    const isExcluded = inv.job.candidate_interest_reviews?.[candidate.id]?.decision === 'not_interested';
 
                                     return (
                                         <ActiveJobRow
                                             key={`app-${inv.job.id}`}
                                             recommendation={inv}
-                                            badgeLabel={assessmentComplete
-                                                ? text('Questionnaire complete', 'Questionario completato')
+                                            badgeLabel={isExcluded
+                                                ? text('Not selected', 'Non selezionato')
                                                 : assessmentRequested
                                                     ? (candidate.ai_refined ? text('Questionnaire requested', 'Questionario richiesto') : text('Profile + questionnaire', 'Profilo + questionario'))
-                                                    : text('Interest shown', 'Interesse mostrato')}
+                                                    : text('Waiting for feedback', 'In attesa di feedback')}
                                             onView={handleViewJob}
                                         />
                                     );
                                 })}
                             </ul>
+                            {invitations.length > 3 && (
+                                <button
+                                    onClick={() => setShowAllApplications(v => !v)}
+                                    className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+                                >
+                                    {showAllApplications
+                                        ? text('Show less', 'Mostra meno')
+                                        : text(`Show all (${invitations.length})`, `Vedi altre (${invitations.length - 3})`)}
+                                </button>
+                            )}
                         </section>
                     )}
 
@@ -712,11 +757,11 @@ const JobSeekerHomePage: React.FC<JobSeekerHomePageProps> = ({ setPage, candidat
                             ) : recommendations.length > 0 ? (
                                 <div className="space-y-4">
                                     <ul className="divide-y divide-slate-200 overflow-hidden rounded-2xl border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-950">
-                                        {recommendations.slice(0, 5).map((rec) => (
+                                        {recommendations.slice(0, 3).map((rec) => (
                                             <JobMatchRow
                                                 key={rec.job.id}
                                                 recommendation={rec}
-                                                badgeLabel={checkCompletion(rec.job.id)
+                                                badgeLabel={getAssessmentStatus(rec.job) === 'assessment_completed'
                                                     ? text('Assessment Complete', 'Assessment completato')
                                                     : text('Recommended', 'Consigliato')}
                                                 onView={handleViewJob}
@@ -730,7 +775,7 @@ const JobSeekerHomePage: React.FC<JobSeekerHomePageProps> = ({ setPage, candidat
                                     >
                                         {text('View all jobs', 'Vedi tutti i lavori')}
                                         <svg
-                                            className="h-4 w-4 transition-transform group-hover:translate-x-0.5"
+                                            className="h-4 w-4 transition-transform"
                                             viewBox="0 0 20 20"
                                             fill="currentColor"
                                             aria-hidden="true"
@@ -765,6 +810,7 @@ const JobSeekerHomePage: React.FC<JobSeekerHomePageProps> = ({ setPage, candidat
                                 </div>
                             )}
                         </div>
+
                     </section>
                 </main>
 
@@ -779,13 +825,6 @@ const JobSeekerHomePage: React.FC<JobSeekerHomePageProps> = ({ setPage, candidat
                         </div>
 
                         <div className="mt-6 space-y-4">
-                            {candidate.ai_refined && (
-                                <div className="inline-flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
-                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>
-                                    {text('AI interview complete', 'Intervista AI completata')}
-                                </div>
-                            )}
-
                             {missingFields.length > 0 && (
                                 <div className="relative">
                                     <div className="flex items-center gap-2">

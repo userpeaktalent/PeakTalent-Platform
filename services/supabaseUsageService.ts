@@ -17,6 +17,7 @@ export interface SupabaseUsageSnapshot {
 
 const MB = 1024 * 1024;
 const GB = 1024 * MB;
+const DEFAULT_SUPABASE_API_REQUEST_LIMIT = 500000;
 
 const normalizeEnvValue = (value: unknown): string => {
   if (typeof value !== 'string') return '';
@@ -72,8 +73,10 @@ const getStorageLimitBytes = (): number | null => {
   return getPlanDefaults(getConfiguredPlan()).storageLimitBytes;
 };
 
-const getApiRequestLimit = (): number | null =>
-  parseNumericEnv((import.meta.env as Record<string, unknown>).VITE_SUPABASE_API_REQUEST_LIMIT);
+const getApiRequestLimit = (): number | null => {
+  const explicitLimit = parseNumericEnv((import.meta.env as Record<string, unknown>).VITE_SUPABASE_API_REQUEST_LIMIT);
+  return explicitLimit ?? DEFAULT_SUPABASE_API_REQUEST_LIMIT;
+};
 
 const getManagementProjectRef = (): string =>
   normalizeEnvValue((import.meta.env as Record<string, unknown>).VITE_SUPABASE_PROJECT_REF);
@@ -214,9 +217,6 @@ export const getSupabaseUsageSnapshot = async (): Promise<SupabaseUsageSnapshot>
       }
     }
 
-    if (snapshot.apiRequestsLimit === null) {
-      notes.push('Set VITE_SUPABASE_API_REQUEST_LIMIT to display remaining API request budget.');
-    }
   } catch (error) {
     const detail = await normalizeEdgeFunctionError(error);
     if (detail) {

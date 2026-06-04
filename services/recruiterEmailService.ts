@@ -1,4 +1,5 @@
 import { supabase } from './supabaseClient';
+import { EMAIL_SENDING_PAUSED_MESSAGE, getEmailSendingEnabled } from './platformSettingsService';
 
 export type RecruiterInviteEmailKind = 'assessment' | 'ai_refinement';
 
@@ -16,6 +17,12 @@ export interface RecruiterInviteEmailInput {
 }
 
 const FUNCTION_NAME = 'send-recruiter-interest-email';
+
+export type RecruiterInviteEmailDispatchStatus = 'sent' | 'paused';
+
+export interface RecruiterInviteEmailDispatchResult {
+  status: RecruiterInviteEmailDispatchStatus;
+}
 
 const normalizeErrorMessage = async (error: unknown): Promise<string> => {
   const response = (error as any)?.context;
@@ -48,15 +55,26 @@ export const buildSeekerJobUrl = (jobId: string): string | undefined => {
   return `${baseUrl.replace(/\/$/, '')}/seeker/job/${jobId}`;
 };
 
-export const sendRecruiterInviteEmail = async (payload: RecruiterInviteEmailInput): Promise<void> => {
+export const sendRecruiterInviteEmail = async (
+  payload: RecruiterInviteEmailInput
+): Promise<RecruiterInviteEmailDispatchResult> => {
+  const emailSendingEnabled = await getEmailSendingEnabled();
+  if (!emailSendingEnabled) {
+    return { status: 'paused' };
+  }
+
   const { error } = await supabase.functions.invoke(FUNCTION_NAME, {
     body: payload,
   });
 
-  if (!error) return;
+  if (!error) return { status: 'sent' };
 
   const message = await normalizeErrorMessage(error);
   const lower = message.toLowerCase();
+
+  if (lower.includes('email sending is currently paused by admin')) {
+    return { status: 'paused' };
+  }
 
   if (
     (lower.includes('failed to send a request to the edge function') && !lower.includes('microsoft')) ||
@@ -70,3 +88,5 @@ export const sendRecruiterInviteEmail = async (payload: RecruiterInviteEmailInpu
 
   throw new Error(message);
 };
+
+export { EMAIL_SENDING_PAUSED_MESSAGE };

@@ -23,6 +23,10 @@ const getEnv = (name: string) => {
   return value;
 };
 
+const optional = (name: string) => Deno.env.get(name)?.trim() || '';
+
+const truncate = (value: string, max = 500) => (value.length > max ? `${value.slice(0, max)}...` : value);
+
 const getManagementToken = () => {
   const preferred = Deno.env.get('PEAKTALENT_SUPABASE_MANAGEMENT_TOKEN')?.trim();
   if (preferred) return preferred;
@@ -55,6 +59,42 @@ const fetchManagementJson = async <T>(path: string, token: string): Promise<T> =
   }
 
   return raw ? JSON.parse(raw) as T : ({} as T);
+};
+
+const insertActivityLog = async (
+  adminClient: ReturnType<typeof createClient>,
+  actor: { userId: string; email: string | null; role: string | null },
+  status: 'success' | 'error',
+  errorMessage?: string
+) => {
+  try {
+    await adminClient.from('activity_logs').insert({
+      actor_user_id: actor.userId,
+      actor_email: actor.email,
+      actor_role: actor.role,
+      effective_profile_id: actor.userId,
+      effective_email: actor.email,
+      effective_role: actor.role,
+      effective_name: null,
+      is_impersonating: false,
+      event_type: 'edge_function_call',
+      status,
+      source: 'admin-supabase-usage',
+      function_name: 'admin-supabase-usage',
+      purpose: 'supabase_usage_snapshot',
+      entity_type: 'platform',
+      entity_id: 'supabase',
+      entity_label: 'Supabase usage',
+      summary: status === 'success'
+        ? 'Loaded Supabase usage snapshot.'
+        : 'Failed to load Supabase usage snapshot.',
+      metadata: {
+        error_message: errorMessage ? truncate(errorMessage) : null,
+      },
+    });
+  } catch (error) {
+    console.warn('[admin-supabase-usage] Activity log insert failed:', error);
+  }
 };
 
 Deno.serve(async (req) => {
@@ -135,6 +175,14 @@ Deno.serve(async (req) => {
       fetchManagementJson<ApiRequestResponse>(`/v1/projects/${projectRef}/analytics/endpoints/usage.api-requests-count`, managementToken),
     ]);
 
+    const actor = {
+      userId: user.id,
+      email: user.email?.trim() || null,
+      role: profile.role || null,
+    };
+
+    await insertActivityLog(adminClient, actor, 'success');
+
     return json({
       databaseLimitBytes: typeof diskConfig.attributes?.size_gb === 'number'
         ? Math.round(diskConfig.attributes.size_gb * 1024 * 1024 * 1024)
@@ -146,6 +194,38 @@ Deno.serve(async (req) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown edge function error.';
+    try {
+      const authorization = req.headers.get('Authorization');
+      const supabaseUrl = optional('SUPABASE_URL');
+      const anonKey = optional('SUPABASE_ANON_KEY');
+      const serviceRoleKey = optional('SUPABASE_SERVICE_ROLE_KEY');
+      if (authorization?.startsWith('Bearer ') && supabaseUrl && anonKey && serviceRoleKey) {
+        const authClient = createClient(supabaseUrl, anonKey, {
+          global: { headers: { Authorization: authorization } },
+          auth: { persistSession: false, autoRefreshToken: false },
+        });
+        const adminClient = createClient(supabaseUrl, serviceRoleKey, {
+          auth: { persistSession: false, autoRefreshToken: false },
+        });
+        const {
+          data: { user },
+        } = await authClient.auth.getUser();
+        if (user?.id) {
+          const { data: profile } = await adminClient
+            .from('profiles')
+            .select('role, email')
+            .eq('id', user.id)
+            .maybeSingle();
+          await insertActivityLog(adminClient, {
+            userId: user.id,
+            email: profile?.email?.trim() || user.email?.trim() || null,
+            role: profile?.role || null,
+          }, 'error', message);
+        }
+      }
+    } catch (logError) {
+      console.warn('[admin-supabase-usage] Failed to log error event:', logError);
+    }
     return json({ error: message }, 500);
   }
 });

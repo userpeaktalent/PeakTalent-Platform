@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { CandidateCvRecord, CandidateProfile, CandidateRefinementChat } from '../types';
 import { addCandidate } from '../services/dbService';
 import { supabase } from '../services/supabaseClient';
@@ -6,17 +7,25 @@ import CandidateForm from './CandidateForm';
 import { useLanguage } from './LanguageProvider';
 import { useAuth } from './AuthProvider';
 import { toast } from 'sonner';
-import { extractCvInfo } from '../services/geminiService';
-import { readFileAsText } from '../utils/fileReader';
+import { extractCvInfoFromFile } from '../services/geminiService';
 import { formatCandidateName } from '../utils/nameFormat';
 import {
   deleteCandidateCvRecord,
   downloadCandidateCv,
   getCandidateCvRecord,
+  getPublicRefinementTranscript,
   getLatestCandidateRefinementChat,
   saveCandidateCv,
 } from '../services/candidateAssetsService';
+import { deleteAccount, deleteAiInterviewData, exportUserData } from '../services/gdprService';
+import { hasSubstantialChanges } from '../utils/profileChanges';
 import RefinementChatModal from './RefinementChatModal';
+import { clearPendingPasswordRecovery } from '../services/passwordRecoveryService';
+import {
+  getCandidateProfileVisibilitySettingEnabled,
+  PLATFORM_CANDIDATE_PROFILE_VISIBILITY_SETTING_CHANGED_EVENT,
+} from '../services/platformSettingsService';
+import PasskeySecurityPanel from './PasskeySecurityPanel';
 
 const UserIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clipRule="evenodd" /></svg>;
 const SettingsIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M11.49 3.17a1 1 0 00-1.98 0l-.14 1.097a1 1 0 01-.75.84 5.98 5.98 0 00-1.41.59 1 1 0 01-1.12-.13l-.86-.7a1 1 0 00-1.4.1l-1.4 1.68a1 1 0 00.1 1.4l.7.86a1 1 0 01.13 1.12c-.24.45-.43.92-.58 1.41a1 1 0 01-.84.75l-1.1.14a1 1 0 000 1.98l1.1.14a1 1 0 01.84.75c.15.49.34.96.58 1.4a1 1 0 01-.13 1.13l-.7.86a1 1 0 00-.1 1.4l1.4 1.68a1 1 0 001.4.1l.86-.7a1 1 0 011.12-.13c.45.24.92.43 1.41.58a1 1 0 01.75.84l.14 1.1a1 1 0 001.98 0l.14-1.1a1 1 0 01.75-.84 5.98 5.98 0 001.41-.58 1 1 0 011.12.13l.86.7a1 1 0 001.4-.1l1.4-1.68a1 1 0 00-.1-1.4l-.7-.86a1 1 0 01-.13-1.12c.24-.45.43-.92.58-1.41a1 1 0 01.84-.75l1.1-.14a1 1 0 000-1.98l-1.1-.14a1 1 0 01-.84-.75 5.98 5.98 0 00-.58-1.41 1 1 0 01.13-1.12l.7-.86a1 1 0 00.1-1.4l-1.4-1.68a1 1 0 00-1.4-.1l-.86.7a1 1 0 01-1.12.13 5.98 5.98 0 00-1.41-.59 1 1 0 01-.75-.84l-.14-1.097zM10.5 13a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" clipRule="evenodd" /></svg>;
@@ -39,6 +48,7 @@ interface SettingsPageProps {
   onLogout: () => void;
   onDeleteAccount: () => void;
   initialTab?: LegacySettingsTab;
+  requirePasswordChange?: boolean;
 }
 
 const SectionCard: React.FC<{ title: string; description: string; children: React.ReactNode }> = ({ title, description, children }) => (
@@ -72,11 +82,15 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   onLogout,
   onDeleteAccount,
   initialTab = 'settings',
+  requirePasswordChange = false,
 }) => {
   const { text } = useLanguage();
   const { isImpersonating } = useAuth();
-  const [activeTab, setActiveTab] = useState<SettingsTab>(mapSettingsTab(initialTab));
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState<SettingsTab>(mapSettingsTab(searchParams.get('tab') || initialTab));
   const [isProfileVisible, setIsProfileVisible] = useState((candidate.profile_visibility ?? 'visible') !== 'private');
+  const [showProfileVisibilitySetting, setShowProfileVisibilitySetting] = useState(false);
   const [isProfileSaving, setIsProfileSaving] = useState(false);
   const [profileFeedback, setProfileFeedback] = useState<{ error: string; success: string }>({ error: '', success: '' });
   const [profileDraft, setProfileDraft] = useState<Partial<CandidateProfile>>(candidate);
@@ -95,10 +109,28 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   });
   const [isSavingPassword, setIsSavingPassword] = useState(false);
   const [termsAccepted, setTermsAccepted] = useState(candidate.terms_and_conditions_accepted ?? true);
+  const [matchingConsent, setMatchingConsent] = useState(candidate.matching_consent ?? true);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+  const [deleteAccountError, setDeleteAccountError] = useState('');
+  const [isDeletingAiData, setIsDeletingAiData] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [reRefineModal, setReRefineModal] = useState<{ updatedProfile: Partial<CandidateProfile> } | null>(null);
 
   useEffect(() => {
-    setActiveTab(mapSettingsTab(initialTab));
-  }, [initialTab]);
+    setActiveTab(requirePasswordChange ? 'security' : mapSettingsTab(searchParams.get('tab') || initialTab));
+  }, [initialTab, requirePasswordChange, searchParams]);
+
+  const handleTabChange = (tab: SettingsTab) => {
+    if (requirePasswordChange && tab !== 'security') {
+      return;
+    }
+    setActiveTab(tab);
+    const nextSearchParams = new URLSearchParams(searchParams);
+    nextSearchParams.set('tab', tab);
+    setSearchParams(nextSearchParams, { replace: true });
+  };
 
   useEffect(() => {
     setProfileDraft(candidate);
@@ -107,6 +139,39 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   useEffect(() => {
     setIsProfileVisible((candidate.profile_visibility ?? 'visible') !== 'private');
   }, [candidate.profile_visibility]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadProfileVisibilitySetting = async () => {
+      try {
+        const enabled = await getCandidateProfileVisibilitySettingEnabled({ force: true });
+        if (!cancelled) {
+          setShowProfileVisibilitySetting(enabled);
+        }
+      } catch (error) {
+        console.error('Failed to load candidate profile visibility setting:', error);
+        if (!cancelled) {
+          setShowProfileVisibilitySetting(false);
+        }
+      }
+    };
+
+    const handleProfileVisibilitySettingChanged = (event: Event) => {
+      const enabled = (event as CustomEvent<{ enabled?: boolean }>).detail?.enabled;
+      if (!cancelled && typeof enabled === 'boolean') {
+        setShowProfileVisibilitySetting(enabled);
+      }
+    };
+
+    void loadProfileVisibilitySetting();
+    window.addEventListener(PLATFORM_CANDIDATE_PROFILE_VISIBILITY_SETTING_CHANGED_EVENT, handleProfileVisibilitySettingChanged as EventListener);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener(PLATFORM_CANDIDATE_PROFILE_VISIBILITY_SETTING_CHANGED_EVENT, handleProfileVisibilitySettingChanged as EventListener);
+    };
+  }, []);
 
   useEffect(() => {
     setTermsAccepted(candidate.terms_and_conditions_accepted ?? true);
@@ -183,6 +248,12 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
     it_skills: updatedProfile.it_skills || candidate.it_skills || [],
     soft_skills: updatedProfile.soft_skills || candidate.soft_skills || [],
     summary_text: updatedProfile.summary_text ?? candidate.summary_text ?? '',
+    summary_text_it: updatedProfile.summary_text !== undefined && updatedProfile.summary_text !== candidate.summary_text
+      ? undefined
+      : updatedProfile.summary_text_it ?? candidate.summary_text_it,
+    summary_text_en: updatedProfile.summary_text !== undefined && updatedProfile.summary_text !== candidate.summary_text
+      ? undefined
+      : updatedProfile.summary_text_en ?? candidate.summary_text_en,
   });
 
   const persistCandidateUpdate = async (updatedProfile: Partial<CandidateProfile>, successMessage: string): Promise<boolean> => {
@@ -191,9 +262,9 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
 
     try {
       const nextProfile = buildCandidateForSave(updatedProfile);
-      await addCandidate(nextProfile);
-      onUpdateProfile(nextProfile);
-      setProfileDraft(nextProfile);
+      const savedProfile = await addCandidate(nextProfile);
+      onUpdateProfile(savedProfile);
+      setProfileDraft(savedProfile);
       setProfileFeedback({ error: '', success: successMessage });
       if (typeof window !== 'undefined') {
         window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -214,13 +285,62 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
     }
   };
 
+  useEffect(() => {
+    if (showProfileVisibilitySetting) return;
+    if ((candidate.profile_visibility ?? 'visible') !== 'private') return;
+
+    const nextProfile = buildCandidateForSave({ profile_visibility: 'visible' });
+    setIsProfileVisible(true);
+    onUpdateProfile(nextProfile);
+    setProfileDraft(nextProfile);
+    void addCandidate(nextProfile)
+      .then((savedProfile) => {
+        onUpdateProfile(savedProfile);
+        setProfileDraft(savedProfile);
+      })
+      .catch((error) => {
+        console.error('Failed to force candidate profile visibility while setting is hidden:', error);
+      });
+  }, [showProfileVisibilitySetting, candidate.profile_visibility, buildCandidateForSave, onUpdateProfile]);
+
   const handleProfileSubmit = async (updatedProfile: Partial<CandidateProfile>, action: 'save' | 'refine') => {
     if (action === 'refine') {
+      await persistCandidateUpdate(updatedProfile, '');
       onOpenProfileRefine();
       return;
     }
 
+    if (hasSubstantialChanges(candidate, updatedProfile)) {
+      setReRefineModal({ updatedProfile });
+      return;
+    }
+
     await persistCandidateUpdate(updatedProfile, text('Your profile has been updated inside settings.', 'Il tuo profilo è stato aggiornato nelle impostazioni.'));
+  };
+
+  const handleConfirmReRefine = async () => {
+    if (!reRefineModal) return;
+    const { updatedProfile } = reRefineModal;
+    setReRefineModal(null);
+    const oldChat = latestRefinementChat;
+    const profileToSave = buildCandidateForSave(updatedProfile);
+    profileToSave.ai_refined = false;
+    profileToSave.ai_refined_at = undefined;
+    profileToSave.last_refinement_chat_backup = oldChat
+      ? { transcript: oldChat.transcript, completed_at: oldChat.completed_at ?? '', archived_at: new Date().toISOString() }
+      : null;
+    const saved = await persistCandidateUpdate(profileToSave, '');
+    if (saved) onOpenProfileRefine();
+  };
+
+  const handleSaveWithoutReRefine = async () => {
+    if (!reRefineModal) return;
+    const { updatedProfile } = reRefineModal;
+    setReRefineModal(null);
+    const profileToSave = buildCandidateForSave(updatedProfile);
+    profileToSave.ai_refined = false;
+    profileToSave.ai_refined_at = undefined;
+    await persistCandidateUpdate(profileToSave, text('Your profile has been updated inside settings.', 'Il tuo profilo è stato aggiornato nelle impostazioni.'));
   };
 
   const handleCvProfileAutofill = async (file: File) => {
@@ -229,8 +349,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
     setProfileFeedback({ error: '', success: '' });
 
     try {
-      const cvText = await readFileAsText(file);
-      const info = await extractCvInfo(cvText);
+      const info = await extractCvInfoFromFile(file);
 
       setProfileDraft((prev) => ({
         ...prev,
@@ -326,14 +445,17 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
     }
   };
 
-  const handleDownloadData = () => {
-    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(candidate, null, 2));
-    const downloadAnchorNode = document.createElement('a');
-    downloadAnchorNode.setAttribute('href', dataStr);
-    downloadAnchorNode.setAttribute('download', `peaktalent_data_${candidate.id}.json`);
-    document.body.appendChild(downloadAnchorNode);
-    downloadAnchorNode.click();
-    downloadAnchorNode.remove();
+  const handleDownloadData = () => void handleExportData();
+
+  const handleMatchingConsentToggle = async () => {
+    const nextValue = !matchingConsent;
+    const saved = await persistCandidateUpdate(
+      { matching_consent: nextValue },
+      nextValue
+        ? text('AI matching enabled. Your profile will be used for personalised job recommendations.', 'Matching AI attivato. Il tuo profilo verrà usato per raccomandazioni personalizzate.')
+        : text('AI matching disabled. You will still see jobs but without personalised ranking.', 'Matching AI disattivato. Vedrai comunque i job ma senza ranking personalizzato.')
+    );
+    if (saved) setMatchingConsent(nextValue);
   };
 
   const handleTermsAcceptedToggle = async () => {
@@ -365,7 +487,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   const changePassword = async () => {
     if (isImpersonating) {
       setSecurityFeedback({
-        error: text('Password changes are disabled while admin impersonation is active.', 'Il cambio password è disattivato durante l’impersonazione admin.'),
+        error: text('Password changes are disabled while admin impersonation is active.', "Il cambio password è disattivato durante l'impersonazione admin."),
         success: '',
       });
       return;
@@ -401,6 +523,20 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
       const { error } = await supabase.auth.updateUser({ password: passwordForm.nextPassword });
       if (error) throw error;
 
+      // Clear must_change_password flag if it was set
+      if (candidate.must_change_password) {
+        const updatedCandidate = { ...candidate, must_change_password: false };
+        const savedProfile = await addCandidate(updatedCandidate);
+        onUpdateProfile(savedProfile);
+      }
+
+      if (requirePasswordChange) {
+        clearPendingPasswordRecovery();
+        const nextSearchParams = new URLSearchParams(searchParams);
+        nextSearchParams.delete('forcePasswordChange');
+        setSearchParams(nextSearchParams, { replace: true });
+      }
+
       setPasswordForm({ nextPassword: '', confirmPassword: '' });
       setSecurityFeedback({
         error: '',
@@ -418,8 +554,53 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   };
 
   const handleDeleteConfirm = () => {
-    if (window.confirm(text('Are you sure you want to delete your account? This action cannot be undone and you will lose all your data.', 'Sei sicuro di voler eliminare il tuo account? Questa azione non può essere annullata e perderai tutti i tuoi dati.'))) {
-      onDeleteAccount();
+    setDeleteConfirmText('');
+    setDeleteAccountError('');
+    setIsDeleteModalOpen(true);
+  };
+
+  const handleDeleteAccountExecute = async () => {
+    if (deleteConfirmText.trim().toUpperCase() !== 'ELIMINA') return;
+    setIsDeletingAccount(true);
+    setDeleteAccountError('');
+    try {
+      await deleteAccount();
+      setIsDeleteModalOpen(false);
+      onLogout();
+    } catch (err: any) {
+      setDeleteAccountError(err?.message || text('Account deletion failed. Please try again.', 'Eliminazione account non riuscita. Riprova.'));
+    } finally {
+      setIsDeletingAccount(false);
+    }
+  };
+
+  const handleDeleteAiData = async () => {
+    if (!window.confirm(text(
+      'This will permanently delete your AI interview transcript and reset your AI refinement status. Continue?',
+      'Questo eliminerà definitivamente la transcript dell\'intervista AI e resetterà il tuo stato di affinamento AI. Continuare?'
+    ))) return;
+    setIsDeletingAiData(true);
+    try {
+      await deleteAiInterviewData(candidate);
+      setLatestRefinementChat(null);
+      onUpdateProfile({ ...candidate, ai_refined: false, ai_refined_at: undefined });
+      toast.success(text('AI interview data deleted.', 'Dati intervista AI eliminati.'));
+    } catch (err: any) {
+      toast.error(err?.message || text('Could not delete AI data. Please try again.', 'Impossibile eliminare i dati AI. Riprova.'));
+    } finally {
+      setIsDeletingAiData(false);
+    }
+  };
+
+  const handleExportData = async () => {
+    setIsExporting(true);
+    try {
+      await exportUserData(candidate);
+      toast.success(text('Your data export has started.', 'L\'esportazione dei tuoi dati è iniziata.'));
+    } catch (err: any) {
+      toast.error(err?.message || text('Export failed. Please try again.', 'Esportazione fallita. Riprova.'));
+    } finally {
+      setIsExporting(false);
     }
   };
 
@@ -460,7 +641,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                     </p>
                   </div>
                   <label className={`inline-flex cursor-pointer items-center justify-center rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white ${isProcessingCv ? 'pointer-events-none opacity-60' : ''}`}>
-                    {isProcessingCv ? text('Processing...', 'Elaborazione...') : text('Upload CV', 'Carica CV')}
+                    {isProcessingCv ? text('Analyzing and saving your CV…', 'Analizziamo e salviamo il tuo CV…') : text('Upload CV', 'Carica CV')}
                     <input
                       type="file"
                       accept=".txt,.pdf,text/plain,application/pdf"
@@ -475,6 +656,20 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                     />
                   </label>
                 </div>
+                {isProcessingCv && (
+                  <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                    <div className="flex items-center gap-3">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" className="h-5 w-5 animate-spin text-slate-900 dark:text-slate-100" fill="none">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                      </svg>
+                      <span className="font-semibold">{text('Your CV is being analyzed and added to your profile. This may take a few minutes.', 'Stiamo analizzando il CV e aggiungendolo al tuo profilo. Questo può richiedere alcuni minuti.')}</span>
+                    </div>
+                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+                      {text('We extract your experience, skills and profile details before showing the updated form.', 'Estraiamo la tua esperienza, competenze e dettagli del profilo prima di mostrare il modulo aggiornato.')}
+                    </p>
+                  </div>
+                )}
 
                 <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950">
                   <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -498,7 +693,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                         </div>
                       ) : (
                         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                          {text('No CV is currently stored on your platform profile.', 'Al momento non c’è alcun CV salvato nel tuo profilo piattaforma.')}
+                          {text('No CV is currently stored on your platform profile.', "Al momento non c'è alcun CV salvato nel tuo profilo piattaforma.")}
                         </p>
                       )}
                     </div>
@@ -572,29 +767,9 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
 
             <SectionCard
               title={text('Settings', 'Impostazioni')}
-              description={text('Control visibility, AI data usage, and matching preferences from one unified seeker settings area.', 'Controlla visibilità, uso dei dati AI e preferenze di matching da un’unica area impostazioni candidato.')}
+              description={text('Control visibility, AI data usage, and matching preferences from one unified seeker settings area.', "Controlla visibilità, uso dei dati AI e preferenze di matching da un'unica area impostazioni candidato.")}
             >
               <div className="space-y-8">
-                <SectionCard
-                  title={text('Privacy & Visibility', 'Privacy e visibilità')}
-                  description={text('Control how discoverable your profile is while keeping the rest of your data safe inside your account.', 'Controlla quanto è visibile il tuo profilo mantenendo al sicuro il resto dei dati nel tuo account.')}
-                >
-                  <div className="rounded-3xl border border-slate-200 bg-slate-50/80 p-5 dark:border-slate-800 dark:bg-slate-900/60">
-                    <div className="flex items-center justify-between gap-6">
-                      <div>
-                        <h3 className="font-semibold text-slate-800 dark:text-slate-200">{text('Profile visibility', 'Visibilità profilo')}</h3>
-                        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                          {text('When private, you stay saved in the system but recruiters will not see you in search.', 'Quando è privato, il tuo profilo resta nel sistema ma i recruiter non ti vedranno nelle ricerche.')}
-                        </p>
-                      </div>
-                      <InlineToggle checked={isProfileVisible} onChange={() => void handleProfileVisibilityToggle()} />
-                    </div>
-                    <div className="mt-4 inline-flex rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500 shadow-sm dark:bg-slate-950 dark:text-slate-300">
-                      {text('Status', 'Stato')}: {isProfileVisible ? text('Active', 'Attivo') : text('Hidden', 'Nascosto')}
-                    </div>
-                  </div>
-                </SectionCard>
-
                 <SectionCard
                   title={text('AI & Data', 'AI e dati')}
                   description={text('Manage how your profile is used for matching, analytics, and data portability.', 'Gestisci come il tuo profilo viene usato per matching, analytics e portabilità dei dati.')}
@@ -612,20 +787,41 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                           />
                           <span className="text-sm text-slate-700 dark:text-slate-300">
                             <span className="font-medium">{text('Generic Terms & Conditions', 'Termini e condizioni generici')}</span>
-                            <span className="mt-1 block text-xs text-slate-500">{text('This consent is stored on your profile and is accepted by default for the platform experience.', 'Questo consenso viene salvato sul tuo profilo ed è accettato di default per l’esperienza in piattaforma.')}</span>
+                            <span className="mt-1 block text-xs text-slate-500">{text('This consent is stored on your profile and is accepted by default for the platform experience.', "Questo consenso viene salvato sul tuo profilo ed è accettato di default per l'esperienza in piattaforma.")}</span>
                           </span>
                         </label>
                       </div>
                     </div>
 
                     <div className="border-t border-slate-200 pt-6 dark:border-slate-800">
+                      <h3 className="mb-4 font-semibold text-slate-800 dark:text-slate-200">{text('AI Matching', 'Matching AI')}</h3>
+                      <div className="rounded-3xl border border-slate-200 bg-slate-50/80 p-5 dark:border-slate-800 dark:bg-slate-900/60">
+                        <div className="flex items-center justify-between gap-6">
+                          <div>
+                            <h4 className="font-semibold text-slate-800 dark:text-slate-200">{text('Personalised job recommendations', 'Raccomandazioni job personalizzate')}</h4>
+                            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                              {text(
+                                'Your profile is converted into an AI vector and compared against all available jobs to surface the most relevant ones for you. Disabling this means jobs will still be shown but without AI-powered ranking.',
+                                'Il tuo profilo viene convertito in un vettore AI e confrontato con tutti i job disponibili per mostrarti i più rilevanti. Disattivando questa opzione i job vengono comunque mostrati ma senza ranking personalizzato dall\'AI.'
+                              )}
+                            </p>
+                          </div>
+                          <InlineToggle checked={matchingConsent} onChange={() => void handleMatchingConsentToggle()} />
+                        </div>
+                        <div className="mt-4 inline-flex rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500 shadow-sm dark:bg-slate-950 dark:text-slate-300">
+                          {text('Status', 'Stato')}: {matchingConsent ? text('Active', 'Attivo') : text('Disabled', 'Disattivato')}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="border-t border-slate-200 pt-6 dark:border-slate-800">
                       <h3 className="mb-4 font-semibold text-slate-800 dark:text-slate-200">{text('Your data', 'I tuoi dati')}</h3>
                       <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
-                        <button onClick={handleDownloadData} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-900/80">
-                          {text('Download My Profile Data', 'Scarica i dati del mio profilo')}
+                        <button onClick={handleDownloadData} disabled={isExporting} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-900/80">
+                          {isExporting ? text('Exporting…', 'Esportazione…') : text('Download My Data (ZIP)', 'Scarica i miei dati (ZIP)')}
                         </button>
-                        <button type="button" onClick={() => toast.info(text('Info page coming soon', 'Pagina informativa in arrivo'))} className="text-sm font-medium text-slate-500 transition-colors hover:text-orange-600 dark:text-slate-400 dark:hover:text-orange-400">
-                          {text('How AI and data policy works', 'Come funzionano AI e policy dati')}
+                        <button type="button" onClick={() => navigate('/seeker/how-matching-works')} className="text-sm font-medium text-slate-500 transition-colors hover:text-orange-600 dark:text-slate-400 dark:hover:text-orange-400">
+                          {text('How matching & AI works', 'Come funzionano matching e AI')}
                         </button>
                       </div>
                     </div>
@@ -635,7 +831,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                       <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-5 dark:border-slate-800 dark:bg-slate-900/60">
                         {isLoadingRefinementChat ? (
                           <p className="text-sm text-slate-500 dark:text-slate-400">
-                            {text('Loading the latest transcript...', 'Caricamento dell’ultima transcript...')}
+                            {text('Loading the latest transcript...', "Caricamento dell'ultima transcript...")}
                           </p>
                         ) : latestRefinementChat ? (
                           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -644,16 +840,26 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                                 {text('Latest completed AI refinement', 'Ultimo affinamento AI completato')}
                               </p>
                               <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                                {latestRefinementChat.transcript.length} {text('messages saved', 'messaggi salvati')} • {text('Completed on', 'Completata il')} {new Date(latestRefinementChat.completed_at || latestRefinementChat.updated_at).toLocaleString()}
+                                {getPublicRefinementTranscript(latestRefinementChat.transcript).length} {text('messages saved', 'messaggi salvati')} • {text('Completed on', 'Completata il')} {new Date(latestRefinementChat.completed_at || latestRefinementChat.updated_at).toLocaleString()}
                               </p>
                             </div>
-                            <button
-                              type="button"
-                              onClick={() => setIsRefinementChatOpen(true)}
-                              className="rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
-                            >
-                              {text('View transcript', 'Vedi transcript')}
-                            </button>
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setIsRefinementChatOpen(true)}
+                                className="rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
+                              >
+                                {text('View transcript', 'Vedi transcript')}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleDeleteAiData()}
+                                disabled={isDeletingAiData}
+                                className="rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50 dark:border-red-900/50 dark:bg-red-950/20 dark:text-red-400 dark:hover:bg-red-900/30"
+                              >
+                                {isDeletingAiData ? text('Deleting…', 'Eliminazione…') : text('Delete AI data', 'Elimina dati AI')}
+                              </button>
+                            </div>
                           </div>
                         ) : (
                           <p className="text-sm text-slate-500 dark:text-slate-400">
@@ -664,6 +870,28 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                     </div>
                   </div>
                 </SectionCard>
+
+                {showProfileVisibilitySetting && (
+                  <SectionCard
+                    title={text('Privacy & Visibility', 'Privacy e visibilità')}
+                    description={text('Control how discoverable your profile is while keeping the rest of your data safe inside your account.', 'Controlla quanto è visibile il tuo profilo mantenendo al sicuro il resto dei dati nel tuo account.')}
+                  >
+                    <div className="rounded-3xl border border-slate-200 bg-slate-50/80 p-5 dark:border-slate-800 dark:bg-slate-900/60">
+                      <div className="flex items-center justify-between gap-6">
+                        <div>
+                          <h3 className="font-semibold text-slate-800 dark:text-slate-200">{text('Profile visibility', 'Visibilità profilo')}</h3>
+                          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                            {text('When private, you stay saved in the system but recruiters will not see you in search.', 'Quando è privato, il tuo profilo resta nel sistema ma i recruiter non ti vedranno nelle ricerche.')}
+                          </p>
+                        </div>
+                        <InlineToggle checked={isProfileVisible} onChange={() => void handleProfileVisibilityToggle()} />
+                      </div>
+                      <div className="mt-4 inline-flex rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500 shadow-sm dark:bg-slate-950 dark:text-slate-300">
+                        {text('Status', 'Stato')}: {isProfileVisible ? text('Active', 'Attivo') : text('Hidden', 'Nascosto')}
+                      </div>
+                    </div>
+                  </SectionCard>
+                )}
 
               </div>
             </SectionCard>
@@ -677,6 +905,12 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
             description={text('Change your seeker password directly from here, just like the recruiter and admin workspaces already do.', 'Cambia la password candidato direttamente da qui, come già avviene negli spazi recruiter e admin.')}
           >
             <div className="grid max-w-2xl gap-5">
+              {requirePasswordChange && (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-300">
+                  {text('This account must set a new password before continuing. Until then, the security section stays locked in focus.', 'Questo account deve impostare una nuova password prima di continuare. Fino ad allora, la sezione sicurezza resta obbligatoria.')}
+                </div>
+              )}
+
               {securityFeedback.error && (
                 <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">
                   {securityFeedback.error}
@@ -722,6 +956,14 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
               >
                 {isSavingPassword ? text('Saving...', 'Salvataggio...') : text('Change Password', 'Cambia password')}
               </button>
+
+              <PasskeySecurityPanel
+                disabled={isImpersonating}
+                disabledReason={text(
+                  'Passkey management is disabled while admin impersonation is active.',
+                  'La gestione passkey è disattivata durante l’impersonazione admin.'
+                )}
+              />
             </div>
           </SectionCard>
         );
@@ -763,6 +1005,53 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
 
   return (
     <div className="mx-auto max-w-[1600px] animate-fade-in px-3 pb-20 pt-2.5 sm:px-8 lg:px-10">
+      {/* Delete account confirmation modal */}
+      {isDeleteModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => !isDeletingAccount && setIsDeleteModalOpen(false)}>
+          <div className="w-full max-w-md rounded-3xl border border-red-200 bg-white p-8 shadow-2xl dark:border-red-900/50 dark:bg-slate-950" onClick={(e) => e.stopPropagation()}>
+            <h2 className="mb-2 text-xl font-bold text-red-600 dark:text-red-400">{text('Delete account', 'Elimina account')}</h2>
+            <p className="mb-4 text-sm text-slate-600 dark:text-slate-400">
+              {text(
+                'This will permanently delete your profile, CV, AI interview data, and all associated records. This cannot be undone.',
+                'Questo eliminerà definitivamente il tuo profilo, CV, dati intervista AI e tutti i record associati. Non è reversibile.'
+              )}
+            </p>
+            <p className="mb-3 text-sm font-semibold text-slate-700 dark:text-slate-300">
+              {text('Type ELIMINA to confirm:', 'Scrivi ELIMINA per confermare:')}
+            </p>
+            <input
+              type="text"
+              value={deleteConfirmText}
+              onChange={(e) => setDeleteConfirmText(e.target.value)}
+              disabled={isDeletingAccount}
+              placeholder="ELIMINA"
+              className="mb-4 w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm font-mono outline-none focus:ring-2 focus:ring-red-500 dark:border-slate-700 dark:bg-slate-900"
+            />
+            {deleteAccountError && (
+              <p className="mb-3 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-950/30 dark:text-red-400">{deleteAccountError}</p>
+            )}
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setIsDeleteModalOpen(false)}
+                disabled={isDeletingAccount}
+                className="flex-1 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+              >
+                {text('Cancel', 'Annulla')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDeleteAccountExecute()}
+                disabled={isDeletingAccount || deleteConfirmText.trim().toUpperCase() !== 'ELIMINA'}
+                className="flex-1 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+              >
+                {isDeletingAccount ? text('Deleting…', 'Eliminazione…') : text('Delete forever', 'Elimina per sempre')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {isRefinementChatOpen && latestRefinementChat && (
         <RefinementChatModal
           chat={latestRefinementChat}
@@ -772,7 +1061,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
       )}
 
       <div className="mb-5">
-        <button onClick={onBack} className="mb-4 inline-flex items-center gap-1 text-sm font-medium text-slate-500 transition-colors hover:text-orange-600 dark:text-slate-400 dark:hover:text-orange-400">
+        <button onClick={() => { if (!requirePasswordChange) onBack(); }} disabled={requirePasswordChange} className="mb-4 inline-flex items-center gap-1 text-sm font-medium text-slate-500 transition-colors hover:text-orange-600 disabled:cursor-not-allowed disabled:opacity-40 dark:text-slate-400 dark:hover:text-orange-400">
           <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
           {text('Back', 'Indietro')}
         </button>
@@ -782,10 +1071,10 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
         <aside className="self-start lg:sticky lg:top-28">
           <div className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950">
             <nav className="space-y-1">
-              <NavButton icon={<UserIcon />} label={text('My Profile', 'Il mio profilo')} onClick={() => setActiveTab('profile')} isActive={activeTab === 'profile'} />
-              <NavButton icon={<SettingsIcon />} label={text('Settings', 'Impostazioni')} onClick={() => setActiveTab('settings')} isActive={activeTab === 'settings'} />
-              <NavButton icon={<LockIcon />} label={text('Security', 'Sicurezza')} onClick={() => setActiveTab('security')} isActive={activeTab === 'security'} />
-              <NavButton icon={<BellIcon />} label={text('Notifications', 'Notifiche')} onClick={() => setActiveTab('notifications')} isActive={activeTab === 'notifications'} />
+              <NavButton icon={<UserIcon />} label={text('My Profile', 'Il mio profilo')} onClick={() => handleTabChange('profile')} isActive={activeTab === 'profile'} />
+              <NavButton icon={<SettingsIcon />} label={text('Settings', 'Impostazioni')} onClick={() => handleTabChange('settings')} isActive={activeTab === 'settings'} />
+              <NavButton icon={<LockIcon />} label={text('Security', 'Sicurezza')} onClick={() => handleTabChange('security')} isActive={activeTab === 'security'} />
+              <NavButton icon={<BellIcon />} label={text('Notifications', 'Notifiche')} onClick={() => handleTabChange('notifications')} isActive={activeTab === 'notifications'} />
 
               <hr className="my-3 border-slate-200 dark:border-slate-800" />
 
@@ -800,6 +1089,51 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
 
         <main className="min-w-0">{renderContent()}</main>
       </div>
+
+      {reRefineModal && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-950 shadow-2xl p-6">
+            <h2 className="text-base font-bold text-slate-800 dark:text-slate-100 mb-2">
+              {text('Update AI interview?', 'Aggiornare il chatbot AI?')}
+            </h2>
+            <p className="text-sm text-slate-500 dark:text-slate-400 mb-5">
+              {text(
+                'You have made significant changes to your skills or experience. Would you like to run the AI interview so recruiters see an accurate and up-to-date picture of your profile?',
+                'Hai modificato in modo sostanziale le tue skill o esperienze. Vuoi fare il chatbot AI così i recruiter vedono un profilo accurato e aggiornato?'
+              )}
+            </p>
+            {candidate.ai_refined && (
+              <p className="text-xs text-slate-400 dark:text-slate-500 mb-5">
+                {text(
+                  'The previous interview will be archived in your profile.',
+                  'Il chatbot precedente verrà archiviato nel tuo profilo.'
+                )}
+              </p>
+            )}
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={handleConfirmReRefine}
+                className="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-2.5 rounded-xl text-sm transition-all"
+              >
+                {text('Yes, run AI interview', 'Sì, fai il chatbot AI')}
+              </button>
+              <button
+                onClick={handleSaveWithoutReRefine}
+                className="w-full rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-900 py-2.5 text-sm font-semibold transition-all"
+              >
+                {text('No, save only', 'No, salva solo')}
+              </button>
+              <button
+                onClick={() => setReRefineModal(null)}
+                className="w-full text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 py-1.5 transition-colors"
+              >
+                {text('Cancel', 'Annulla')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 };

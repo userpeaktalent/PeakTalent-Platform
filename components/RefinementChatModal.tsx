@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { CandidateRefinementChat } from '../types';
-import { downloadCandidateRefinementChat } from '../services/candidateAssetsService';
+import { downloadCandidateRefinementChat, getPublicRefinementTranscript } from '../services/candidateAssetsService';
 import { useLanguage } from './LanguageProvider';
 
 interface RefinementChatModalProps {
@@ -16,6 +16,7 @@ const RefinementChatModal: React.FC<RefinementChatModalProps> = ({
 }) => {
     const { text } = useLanguage();
     const [downloadingFormat, setDownloadingFormat] = useState<'json' | 'csv' | null>(null);
+    const publicTranscript = getPublicRefinementTranscript(chat.transcript);
 
     const handleDownload = async (format: 'json' | 'csv') => {
         setDownloadingFormat(format);
@@ -38,7 +39,7 @@ const RefinementChatModal: React.FC<RefinementChatModalProps> = ({
                             {candidateLabel}
                         </h2>
                         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                            {chat.transcript.length} {text('messages saved', 'messaggi salvati')} • {text('Completed on', 'Completata il')} {new Date(chat.completed_at || chat.updated_at).toLocaleString()}
+                            {publicTranscript.length} {text('messages saved', 'messaggi salvati')} • {text('Completed on', 'Completata il')} {new Date(chat.completed_at || chat.updated_at).toLocaleString()}
                         </p>
                     </div>
 
@@ -70,9 +71,9 @@ const RefinementChatModal: React.FC<RefinementChatModalProps> = ({
                 </div>
 
                 <div className="max-h-[calc(88vh-120px)] overflow-y-auto px-6 py-6">
-                    {chat.transcript.length > 0 ? (
+                    {publicTranscript.length > 0 ? (
                         <div className="space-y-4">
-                            {chat.transcript.map((message, index) => {
+                            {publicTranscript.map((message, index) => {
                                 const isUser = message.role === 'user';
 
                                 return (

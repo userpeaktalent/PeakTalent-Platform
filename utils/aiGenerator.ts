@@ -1,8 +1,7 @@
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { CandidateProfile, JobProfile } from "../types";
 import { cleanJson } from "../services/geminiService";
-import { getGeminiApiKey } from "../services/envService";
+import { getGenerativeModel } from "../services/geminiClient";
 import { getModel } from "../config/aiModels";
 import { EDUCATION_LEVELS } from "../utils/education";
 import { MAJORS } from "../utils/majors";
@@ -201,7 +200,7 @@ const CANDIDATE_SCHEMA_REF = `{
   },
   "summary_text": string (2-3 sentence career summary),
   "experiences": [{ "role": string, "company": string, "location": { "country": string, "city": string }, "from": "YYYY-MM", "to": "YYYY-MM" or "present", "is_current_position": boolean, "description": string }],
-  "education": [{ "institution": string, "degree_level": string, "major": string, "from": "YYYY-MM", "to": "YYYY-MM", "currently_pursuing": boolean }]
+  "education": [{ "institution": string, "degree_level": "PRIMARY"|"LOWER_SECONDARY"|"UPPER_SECONDARY"|"BACHELOR"|"ITS"|"MASTER"|"PHD", "major": string, "from": "YYYY-MM", "to": "YYYY-MM", "currently_pursuing": boolean }]
 }`;
 
 const JOB_SCHEMA_REF = `{
@@ -226,15 +225,8 @@ const JOB_SCHEMA_REF = `{
 }`;
 
 export const generateFakeCandidate = async (): Promise<Partial<CandidateProfile>> => {
-    const apiKey = getGeminiApiKey();
-    if (!apiKey) {
-        console.warn("Gemini API Key missing, using fallback data.");
-        return fallbackCandidate();
-    }
-
     try {
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({
+        const model = getGenerativeModel({
             model: getModel('fakeDataGen'),
             generationConfig: { responseMimeType: "application/json" }
         });
@@ -295,15 +287,8 @@ ${CANDIDATE_SCHEMA_REF}`;
 }
 
 export const generateFakeJob = async (): Promise<JobProfile> => {
-    const apiKey = getGeminiApiKey();
-    if (!apiKey) {
-        console.warn("Gemini API Key missing, using fallback data.");
-        return fallbackJob();
-    }
-
     try {
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({
+        const model = getGenerativeModel({
             model: getModel('fakeDataGen'),
             generationConfig: { responseMimeType: "application/json" }
         });

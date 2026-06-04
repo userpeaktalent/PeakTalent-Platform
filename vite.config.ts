@@ -1,11 +1,9 @@
 import path from 'path';
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, '.', '');
-  const geminiKey = env.GEMINI_API_KEY || env.VITE_GEMINI_API_KEY || '';
   const isProd = mode === 'production';
   return {
     server: {
@@ -16,10 +14,6 @@ export default defineConfig(({ mode }) => {
       react(),
       tailwindcss(),
     ],
-    define: {
-      'process.env.GEMINI_API_KEY': JSON.stringify(geminiKey),
-      'process.env.VITE_GEMINI_API_KEY': JSON.stringify(env.VITE_GEMINI_API_KEY || geminiKey)
-    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
@@ -44,8 +38,6 @@ export default defineConfig(({ mode }) => {
             if (!id.includes('node_modules')) return undefined;
             if (id.includes('pdfjs-dist')) return 'vendor-pdfjs';
             if (id.includes('mammoth')) return 'vendor-mammoth';
-            if (id.includes('country-state-city')) return 'vendor-countries';
-            if (id.includes('@google/genai') || id.includes('@google/generative-ai')) return 'vendor-gemini';
             if (id.includes('@supabase')) return 'vendor-supabase';
             if (id.includes('react-router')) return 'vendor-router';
             if (id.includes('sonner')) return 'vendor-sonner';

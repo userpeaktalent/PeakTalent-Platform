@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { CandidateCvRecord, JobProfile, CandidateProfile, User, RecruiterProfile, Notification } from '../types';
 import {
     getAllJobs,
@@ -8,6 +8,7 @@ import {
     getAllUsers,
     getAllRecruiters,
     deleteJob,
+    ensureLocalizedCandidateContent,
 } from '../services/dbService';
 import { supabase } from '../services/supabaseClient';
 import { attachEmbeddingMetadata, getEmbedding, generateHash, EMBEDDING_MODEL_ID, EMBEDDING_VERSION } from '../services/embeddingService';
@@ -18,13 +19,13 @@ import JobProfileForm from './JobProfileForm';
 import RecruiterProfileSetup from './RecruiterProfileSetup';
 import { generateFakeCandidate, generateFakeJob, generateUUID } from '../utils/aiGenerator';
 import { MODEL_CATALOG, EMBEDDING_CATALOG, AI_TASK_META, AITaskKey, getCodeDefault, setModelOverride, hasOverride, resetAllOverrides, getAllModels } from '../config/aiModels';
-import { createSystemAdmin, createSystemRecruiter, createSystemSeeker, DEFAULT_TEMP_RECRUITER_PASSWORD, ProvisionedAccountRecord, updateSystemAdminProfile } from '../services/adminService';
+import { createSystemAdmin, createSystemRecruiter, createSystemSeeker, DEFAULT_TEMP_RECRUITER_PASSWORD, ProvisionedAccountRecord, updateSystemAdminProfile, resetUserPassword, markUserMustChangePassword } from '../services/adminService';
 import { hasGeminiApiKey } from '../services/envService';
-import { extractCvInfo } from '../services/geminiService';
+import { extractCvInfoFromFile } from '../services/geminiService';
 import { readFileAsText } from '../utils/fileReader';
 import { useAuth } from './AuthProvider';
 import { useLanguage } from './LanguageProvider';
-import { buildRecruiterInviteMailto } from '../services/accessLinks';
+import { buildAdminPasswordResetMailto, buildRecruiterInviteMailto } from '../services/accessLinks';
 import { getSupabaseUsageSnapshot, SupabaseUsageSnapshot } from '../services/supabaseUsageService';
 import {
     buildNormalizedFullName,
@@ -39,7 +40,23 @@ import {
     getAllCandidateCvRecords,
     saveCandidateCv,
 } from '../services/candidateAssetsService';
+import { ActivityLogRecord, listActivityLogs } from '../services/activityLogService';
 import AdminBugReports from './AdminBugReports';
+import { withRetry } from '../utils/retry';
+import {
+    getEmailSendingEnabled,
+    getCandidateProfileVisibilitySettingEnabled,
+    getRecruiterAllCandidatesEnabled,
+    getSeekerOAuthEnabled,
+    PLATFORM_CANDIDATE_PROFILE_VISIBILITY_SETTING_CHANGED_EVENT,
+    PLATFORM_EMAIL_SETTING_CHANGED_EVENT,
+    PLATFORM_RECRUITER_ALL_CANDIDATES_CHANGED_EVENT,
+    PLATFORM_SEEKER_OAUTH_CHANGED_EVENT,
+    setCandidateProfileVisibilitySettingEnabled,
+    setEmailSendingEnabled,
+    setRecruiterAllCandidatesEnabled,
+    setSeekerOAuthEnabled,
+} from '../services/platformSettingsService';
 
 // Icons
 const TrashIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><path d="M10 11v6" /><path d="M14 11v6" /></svg>;
@@ -48,6 +65,7 @@ const SearchIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" heig
 const CopyIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></svg>;
 const LoginIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" /><polyline points="10 17 15 12 10 7" /><line x1="15" y1="12" x2="3" y2="12" /></svg>;
 const RefreshIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>;
+const KeyIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2l-2 2m-5.5-1a6 6 0 1 1-8.486 8.486A6 6 0 0 1 12.88 2.88z" /><circle cx="8" cy="16" r="2" /></svg>;
 const CandidateMetricIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2" /><circle cx="9.5" cy="7" r="4" /><path d="M20 8v6" /><path d="M23 11h-6" /></svg>;
 const RecruiterMetricIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="6" width="18" height="13" rx="3" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><path d="M3 11h18" /></svg>;
 const PostingMetricIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /><path d="M8 13h8" /><path d="M8 17h5" /></svg>;
@@ -59,12 +77,22 @@ const AiCompletedMetricIcon = () => <svg xmlns="http://www.w3.org/2000/svg" widt
 const AiIncompleteMetricIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 8v5" /><path d="M12 16h.01" /></svg>;
 
 type EntityType = 'user' | 'candidate' | 'recruiter' | 'job';
-type DebugTab = 'overview' | 'admins' | 'provisioning' | 'exports' | 'candidates' | 'recruiters' | 'jobs' | 'ai_models' | 'bug_reports';
+type DebugTab = 'overview' | 'admins' | 'provisioning' | 'exports' | 'candidates' | 'recruiters' | 'jobs' | 'logs' | 'ai_models' | 'bug_reports';
 type FactoryKind = 'seekers' | 'jobs' | 'recruiters';
 type BatchProgressKind = FactoryKind | 'cv_seekers';
 type DialogTone = 'danger' | 'warning' | 'info';
 type ExportScope = 'seekers' | 'recruiters' | 'jobs' | 'all';
 type ExportFormat = 'json' | 'csv';
+type LogCategoryFilter = 'all' | 'edge_function' | 'gemini' | 'job_created' | 'profile_created';
+const DEFAULT_AI_REQUEST_LIMIT = 500000;
+
+const mapDebugTab = (tab?: string | null): DebugTab => {
+    if (tab === 'admins') return 'ai_models';
+    if (tab === 'overview' || tab === 'provisioning' || tab === 'exports' || tab === 'candidates' || tab === 'recruiters' || tab === 'jobs' || tab === 'logs' || tab === 'ai_models' || tab === 'bug_reports') {
+        return tab;
+    }
+    return 'overview';
+};
 
 type DeleteDialogState = {
     type: EntityType;
@@ -135,6 +163,7 @@ interface ActionLoadingState {
     createProvisionSeekersFromCv: boolean;
     createProvisionRecruiter: boolean;
     recomputeAll: boolean;
+    localizeCandidates: boolean;
 }
 
 const initialLoadingState: ActionLoadingState = {
@@ -146,6 +175,7 @@ const initialLoadingState: ActionLoadingState = {
     createProvisionSeekersFromCv: false,
     createProvisionRecruiter: false,
     recomputeAll: false,
+    localizeCandidates: false,
 };
 
 const MAX_SEEKER_CV_UPLOADS = 10;
@@ -257,6 +287,7 @@ const buildProvisionedSeekerIdentity = (
 const DebugView: React.FC = () => {
     const { text } = useLanguage();
     const navigate = useNavigate();
+    const [searchParams, setSearchParams] = useSearchParams();
     const { startImpersonation, user, refreshProfile } = useAuth();
     const [jobs, setJobs] = useState<JobProfile[]>([]);
     const [candidates, setCandidates] = useState<CandidateProfile[]>([]);
@@ -265,10 +296,15 @@ const DebugView: React.FC = () => {
     const [notifications, setNotifications] = useState<Notification[]>([]);
     const [candidateCvs, setCandidateCvs] = useState<CandidateCvRecord[]>([]);
     const [supabaseUsage, setSupabaseUsage] = useState<SupabaseUsageSnapshot | null>(null);
+    const [activityLogs, setActivityLogs] = useState<ActivityLogRecord[]>([]);
+    const [activityLogsLoading, setActivityLogsLoading] = useState(false);
+    const [activityLogsError, setActivityLogsError] = useState<string | null>(null);
+    const [logCategoryFilter, setLogCategoryFilter] = useState<LogCategoryFilter>('all');
+    const [logActorFilter, setLogActorFilter] = useState('all');
     // Map job_id -> { recruiter_id, recruiter_email, recruiter_name } for showing ownership
     const [jobRecruiterMap, setJobRecruiterMap] = useState<Record<string, { id: string; email: string; name: string }>>({});
     const [isLoading, setIsLoading] = useState(true);
-    const [activeTab, setActiveTab] = useState<DebugTab>('overview');
+    const [activeTab, setActiveTab] = useState<DebugTab>(() => mapDebugTab(searchParams.get('tab')));
     const [searchQuery, setSearchQuery] = useState('');
     const [actionLoading, setActionLoading] = useState<ActionLoadingState>(initialLoadingState);
     const [batchProgress, setBatchProgress] = useState<{ kind: BatchProgressKind; current: number; total: number } | null>(null);
@@ -336,6 +372,32 @@ const DebugView: React.FC = () => {
     const [isAdminEditSaving, setIsAdminEditSaving] = useState(false);
     const [cvActionState, setCvActionState] = useState<{ id: string; action: 'download' | 'delete' } | null>(null);
     const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
+    const [emailSendingEnabled, setEmailSendingEnabledState] = useState(false);
+    const [isEmailSettingLoading, setIsEmailSettingLoading] = useState(true);
+    const [isEmailSettingSaving, setIsEmailSettingSaving] = useState(false);
+    const [emailSettingError, setEmailSettingError] = useState<string | null>(null);
+    const [recruiterAllCandidatesEnabled, setRecruiterAllCandidatesEnabledState] = useState(false);
+    const [isRecruiterAllCandidatesLoading, setIsRecruiterAllCandidatesLoading] = useState(true);
+    const [isRecruiterAllCandidatesSaving, setIsRecruiterAllCandidatesSaving] = useState(false);
+    const [recruiterAllCandidatesError, setRecruiterAllCandidatesError] = useState<string | null>(null);
+    const [candidateProfileVisibilitySettingEnabled, setCandidateProfileVisibilitySettingEnabledState] = useState(false);
+    const [isCandidateProfileVisibilitySettingLoading, setIsCandidateProfileVisibilitySettingLoading] = useState(true);
+    const [isCandidateProfileVisibilitySettingSaving, setIsCandidateProfileVisibilitySettingSaving] = useState(false);
+    const [candidateProfileVisibilitySettingError, setCandidateProfileVisibilitySettingError] = useState<string | null>(null);
+    const [seekerOAuthEnabled, setSeekerOAuthEnabledState] = useState(false);
+    const [isSeekerOAuthLoading, setIsSeekerOAuthLoading] = useState(true);
+    const [isSeekerOAuthSaving, setIsSeekerOAuthSaving] = useState(false);
+    const [seekerOAuthError, setSeekerOAuthError] = useState<string | null>(null);
+    
+    // Reset Password State
+    const [resetPasswordConfirm, setResetPasswordConfirm] = useState<{ userId: string; email: string; userType: 'candidate' | 'recruiter' } | null>(null);
+    const [resetPasswordForm, setResetPasswordForm] = useState<{ password: string }>({
+        password: 'password123!',
+    });
+    const [isResettingPassword, setIsResettingPassword] = useState(false);
+    const [resetPasswordSuccess, setResetPasswordSuccess] = useState<{ email: string; password: string } | null>(null);
+    const [resetPasswordError, setResetPasswordError] = useState<string | null>(null);
+    
     const provisionConflictResolverRef = useRef<((decision: { action: 'cancel' } | { action: 'retry'; email: string }) => void) | null>(null);
 
     // AI Model settings
@@ -348,14 +410,172 @@ const DebugView: React.FC = () => {
     }, []);
 
     useEffect(() => {
+        let cancelled = false;
+
+        const loadEmailSetting = async () => {
+            setIsEmailSettingLoading(true);
+            setEmailSettingError(null);
+            try {
+                const enabled = await getEmailSendingEnabled({ force: true });
+                if (!cancelled) {
+                    setEmailSendingEnabledState(enabled);
+                }
+            } catch (error: any) {
+                if (!cancelled) {
+                    setEmailSendingEnabledState(false);
+                    setEmailSettingError(error?.message || text('Unable to load the email setting.', 'Impossibile caricare l’impostazione email.'));
+                }
+            } finally {
+                if (!cancelled) {
+                    setIsEmailSettingLoading(false);
+                }
+            }
+        };
+
+        const handleEmailSettingChanged = (event: Event) => {
+            const nextValue = (event as CustomEvent<{ enabled?: boolean }>).detail?.enabled;
+            if (!cancelled && typeof nextValue === 'boolean') {
+                setEmailSendingEnabledState(nextValue);
+                setEmailSettingError(null);
+            }
+        };
+
+        loadEmailSetting();
+        window.addEventListener(PLATFORM_EMAIL_SETTING_CHANGED_EVENT, handleEmailSettingChanged as EventListener);
+
+        return () => {
+            cancelled = true;
+            window.removeEventListener(PLATFORM_EMAIL_SETTING_CHANGED_EVENT, handleEmailSettingChanged as EventListener);
+        };
+    }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const loadRecruiterAllCandidatesSetting = async () => {
+            setIsRecruiterAllCandidatesLoading(true);
+            setRecruiterAllCandidatesError(null);
+            try {
+                const enabled = await getRecruiterAllCandidatesEnabled({ force: true });
+                if (!cancelled) {
+                    setRecruiterAllCandidatesEnabledState(enabled);
+                }
+            } catch (error: any) {
+                if (!cancelled) {
+                    setRecruiterAllCandidatesEnabledState(false);
+                    setRecruiterAllCandidatesError(error?.message || text('Unable to load the recruiter candidate visibility setting.', 'Impossibile caricare l’impostazione visibilità candidati recruiter.'));
+                }
+            } finally {
+                if (!cancelled) {
+                    setIsRecruiterAllCandidatesLoading(false);
+                }
+            }
+        };
+
+        const handleRecruiterAllCandidatesSettingChanged = (event: Event) => {
+            const nextValue = (event as CustomEvent<{ enabled?: boolean }>).detail?.enabled;
+            if (!cancelled && typeof nextValue === 'boolean') {
+                setRecruiterAllCandidatesEnabledState(nextValue);
+                setRecruiterAllCandidatesError(null);
+            }
+        };
+
+        loadRecruiterAllCandidatesSetting();
+        window.addEventListener(PLATFORM_RECRUITER_ALL_CANDIDATES_CHANGED_EVENT, handleRecruiterAllCandidatesSettingChanged as EventListener);
+
+        return () => {
+            cancelled = true;
+            window.removeEventListener(PLATFORM_RECRUITER_ALL_CANDIDATES_CHANGED_EVENT, handleRecruiterAllCandidatesSettingChanged as EventListener);
+        };
+    }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const loadCandidateProfileVisibilitySetting = async () => {
+            setIsCandidateProfileVisibilitySettingLoading(true);
+            setCandidateProfileVisibilitySettingError(null);
+            try {
+                const enabled = await getCandidateProfileVisibilitySettingEnabled({ force: true });
+                if (!cancelled) {
+                    setCandidateProfileVisibilitySettingEnabledState(enabled);
+                }
+            } catch (error: any) {
+                if (!cancelled) {
+                    setCandidateProfileVisibilitySettingEnabledState(false);
+                    setCandidateProfileVisibilitySettingError(error?.message || text('Unable to load the candidate profile visibility setting.', 'Impossibile caricare l’impostazione visibilità profilo candidato.'));
+                }
+            } finally {
+                if (!cancelled) {
+                    setIsCandidateProfileVisibilitySettingLoading(false);
+                }
+            }
+        };
+
+        const handleCandidateProfileVisibilitySettingChanged = (event: Event) => {
+            const nextValue = (event as CustomEvent<{ enabled?: boolean }>).detail?.enabled;
+            if (!cancelled && typeof nextValue === 'boolean') {
+                setCandidateProfileVisibilitySettingEnabledState(nextValue);
+                setCandidateProfileVisibilitySettingError(null);
+            }
+        };
+
+        loadCandidateProfileVisibilitySetting();
+        window.addEventListener(PLATFORM_CANDIDATE_PROFILE_VISIBILITY_SETTING_CHANGED_EVENT, handleCandidateProfileVisibilitySettingChanged as EventListener);
+
+        return () => {
+            cancelled = true;
+            window.removeEventListener(PLATFORM_CANDIDATE_PROFILE_VISIBILITY_SETTING_CHANGED_EVENT, handleCandidateProfileVisibilitySettingChanged as EventListener);
+        };
+    }, [text]);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const loadSeekerOAuthSetting = async () => {
+            setIsSeekerOAuthLoading(true);
+            setSeekerOAuthError(null);
+            try {
+                const enabled = await getSeekerOAuthEnabled({ force: true });
+                if (!cancelled) {
+                    setSeekerOAuthEnabledState(enabled);
+                }
+            } catch (error: any) {
+                if (!cancelled) {
+                    setSeekerOAuthEnabledState(false);
+                    setSeekerOAuthError(error?.message || text('Unable to load the Google/Apple access setting.', 'Impossibile caricare l’impostazione accesso Google/Apple.'));
+                }
+            } finally {
+                if (!cancelled) {
+                    setIsSeekerOAuthLoading(false);
+                }
+            }
+        };
+
+        const handleSeekerOAuthSettingChanged = (event: Event) => {
+            const nextValue = (event as CustomEvent<{ enabled?: boolean }>).detail?.enabled;
+            if (!cancelled && typeof nextValue === 'boolean') {
+                setSeekerOAuthEnabledState(nextValue);
+                setSeekerOAuthError(null);
+            }
+        };
+
+        loadSeekerOAuthSetting();
+        window.addEventListener(PLATFORM_SEEKER_OAUTH_CHANGED_EVENT, handleSeekerOAuthSettingChanged as EventListener);
+
+        return () => {
+            cancelled = true;
+            window.removeEventListener(PLATFORM_SEEKER_OAUTH_CHANGED_EVENT, handleSeekerOAuthSettingChanged as EventListener);
+        };
+    }, [text]);
+
+    useEffect(() => {
         setSearchQuery('');
     }, [activeTab]);
 
     useEffect(() => {
-        if (activeTab === 'admins') {
-            setActiveTab('ai_models');
-        }
-    }, [activeTab]);
+        setActiveTab(mapDebugTab(searchParams.get('tab')));
+    }, [searchParams]);
 
     useEffect(() => {
         const handleAdminMobileNavToggle = () => {
@@ -395,10 +615,98 @@ const DebugView: React.FC = () => {
         navigator.clipboard.writeText(text).then(() => showToast(`Copied: ${text}`));
     }, [showToast]);
 
+    const handleToggleEmailSending = useCallback(async () => {
+        if (isEmailSettingLoading || isEmailSettingSaving) return;
+
+        const nextValue = !emailSendingEnabled;
+        setEmailSendingEnabledState(nextValue);
+        setIsEmailSettingSaving(true);
+        setEmailSettingError(null);
+
+        try {
+            await setEmailSendingEnabled(nextValue);
+        } catch (error: any) {
+            setEmailSendingEnabledState(!nextValue);
+            setEmailSettingError(
+                error?.message ||
+                text('Unable to save the email setting.', 'Impossibile salvare l’impostazione email.')
+            );
+        } finally {
+            setIsEmailSettingSaving(false);
+        }
+    }, [emailSendingEnabled, isEmailSettingLoading, isEmailSettingSaving, text]);
+
+    const handleToggleRecruiterAllCandidates = useCallback(async () => {
+        if (isRecruiterAllCandidatesLoading || isRecruiterAllCandidatesSaving) return;
+
+        const nextValue = !recruiterAllCandidatesEnabled;
+        setRecruiterAllCandidatesEnabledState(nextValue);
+        setIsRecruiterAllCandidatesSaving(true);
+        setRecruiterAllCandidatesError(null);
+
+        try {
+            await setRecruiterAllCandidatesEnabled(nextValue);
+        } catch (error: any) {
+            setRecruiterAllCandidatesEnabledState(!nextValue);
+            setRecruiterAllCandidatesError(
+                error?.message ||
+                text('Unable to save the recruiter candidate visibility setting.', 'Impossibile salvare l’impostazione visibilità candidati recruiter.')
+            );
+        } finally {
+            setIsRecruiterAllCandidatesSaving(false);
+        }
+    }, [recruiterAllCandidatesEnabled, isRecruiterAllCandidatesLoading, isRecruiterAllCandidatesSaving, text]);
+
+    const handleToggleCandidateProfileVisibilitySetting = useCallback(async () => {
+        if (isCandidateProfileVisibilitySettingLoading || isCandidateProfileVisibilitySettingSaving) return;
+
+        const nextValue = !candidateProfileVisibilitySettingEnabled;
+        setCandidateProfileVisibilitySettingEnabledState(nextValue);
+        setIsCandidateProfileVisibilitySettingSaving(true);
+        setCandidateProfileVisibilitySettingError(null);
+
+        try {
+            await setCandidateProfileVisibilitySettingEnabled(nextValue);
+        } catch (error: any) {
+            setCandidateProfileVisibilitySettingEnabledState(!nextValue);
+            setCandidateProfileVisibilitySettingError(
+                error?.message ||
+                text('Unable to save the candidate profile visibility setting.', 'Impossibile salvare l’impostazione visibilità profilo candidato.')
+            );
+        } finally {
+            setIsCandidateProfileVisibilitySettingSaving(false);
+        }
+    }, [candidateProfileVisibilitySettingEnabled, isCandidateProfileVisibilitySettingLoading, isCandidateProfileVisibilitySettingSaving, text]);
+
+    const handleToggleSeekerOAuth = useCallback(async () => {
+        if (isSeekerOAuthLoading || isSeekerOAuthSaving) return;
+
+        const nextValue = !seekerOAuthEnabled;
+        setSeekerOAuthEnabledState(nextValue);
+        setIsSeekerOAuthSaving(true);
+        setSeekerOAuthError(null);
+
+        try {
+            await setSeekerOAuthEnabled(nextValue);
+        } catch (error: any) {
+            setSeekerOAuthEnabledState(!nextValue);
+            setSeekerOAuthError(
+                error?.message ||
+                text('Unable to save the Google/Apple access setting.', 'Impossibile salvare l’impostazione accesso Google/Apple.')
+            );
+        } finally {
+            setIsSeekerOAuthSaving(false);
+        }
+    }, [seekerOAuthEnabled, isSeekerOAuthLoading, isSeekerOAuthSaving, text]);
+
     const handleSelectTab = useCallback((tab: DebugTab) => {
-        setActiveTab(tab === 'admins' ? 'ai_models' : tab);
+        const normalizedTab = tab === 'admins' ? 'ai_models' : tab;
+        setActiveTab(normalizedTab);
+        const nextSearchParams = new URLSearchParams(searchParams);
+        nextSearchParams.set('tab', normalizedTab);
+        setSearchParams(nextSearchParams, { replace: true });
         setIsMobileNavOpen(false);
-    }, []);
+    }, [searchParams, setSearchParams]);
 
     const isDuplicateProvisionError = useCallback((error: any) => {
         const message = String(error?.message || '').toLowerCase();
@@ -479,6 +787,21 @@ const DebugView: React.FC = () => {
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
     }, []);
+
+    const loadActivityLogs = useCallback(async () => {
+        setActivityLogsLoading(true);
+        setActivityLogsError(null);
+        try {
+            const logs = await listActivityLogs(150);
+            setActivityLogs(logs);
+        } catch (error: any) {
+            const message = error?.message || text('Unable to load logs right now.', 'Impossibile caricare i log in questo momento.');
+            setActivityLogsError(message);
+            throw error;
+        } finally {
+            setActivityLogsLoading(false);
+        }
+    }, [text]);
 
     const fetchData = async () => {
         setIsLoading(true);
@@ -562,12 +885,37 @@ const DebugView: React.FC = () => {
             setNotifications(notificationData);
         } catch (err) {
             console.error("Failed to fetch data", err);
+            throw err;
         } finally {
             setIsLoading(false);
         }
     };
 
-    useEffect(() => { fetchData(); }, []);
+    useEffect(() => {
+        void withRetry(() => fetchData(), {
+            attempts: 3,
+            delaysMs: [0, 900, 2200],
+            onRetry: (error, attempt) => {
+                console.warn(`Retrying admin dashboard load after failed attempt ${attempt}:`, error);
+            },
+        }).catch((error) => {
+            console.error('Admin dashboard data could not be fully loaded after retries:', error);
+        });
+    }, []);
+
+    useEffect(() => {
+        if (activeTab !== 'logs' && activeTab !== 'overview') return;
+
+        void withRetry(() => loadActivityLogs(), {
+            attempts: 2,
+            delaysMs: [0, 900],
+            onRetry: (error, attempt) => {
+                console.warn(`Retrying admin logs load after failed attempt ${attempt}:`, error);
+            },
+        }).catch((error) => {
+            console.error('Admin activity logs could not be fully loaded after retries:', error);
+        });
+    }, [activeTab, loadActivityLogs]);
 
     const handleOpenEdit = (type: EntityType, data: object) => {
         setEditEntity({ type, data, jsonMode: false });
@@ -709,6 +1057,84 @@ const DebugView: React.FC = () => {
             showToast('Entity updated successfully');
         } finally {
             setIsUpdating(false);
+        }
+    };
+
+    const handleLocalizeExistingCandidates = async () => {
+        if (actionLoading.localizeCandidates || anyActionLoading) return;
+
+        setActionLoading((current) => ({ ...current, localizeCandidates: true }));
+        try {
+            let updated = 0;
+            const errors: string[] = [];
+
+            for (const candidate of candidates) {
+                try {
+                    const before = JSON.stringify({
+                        summary_text_it: candidate.summary_text_it,
+                        summary_text_en: candidate.summary_text_en,
+                        experiences: (candidate.experiences || []).map((exp) => ({
+                            description_it: exp.description_it,
+                            description_en: exp.description_en,
+                        })),
+                        education: (candidate.education || []).map((edu) => ({
+                            description_it: edu.description_it,
+                            description_en: edu.description_en,
+                        })),
+                    });
+                    const localizedCandidate = await ensureLocalizedCandidateContent(candidate);
+                    const after = JSON.stringify({
+                        summary_text_it: localizedCandidate.summary_text_it,
+                        summary_text_en: localizedCandidate.summary_text_en,
+                        experiences: (localizedCandidate.experiences || []).map((exp) => ({
+                            description_it: exp.description_it,
+                            description_en: exp.description_en,
+                        })),
+                        education: (localizedCandidate.education || []).map((edu) => ({
+                            description_it: edu.description_it,
+                            description_en: edu.description_en,
+                        })),
+                    });
+
+                    if (before !== after) {
+                        await persistDebugEdit('candidate', localizedCandidate);
+                        updated++;
+                    }
+                } catch (error: any) {
+                    errors.push(`${formatCandidateName(candidate) || candidate.contacts?.email || candidate.id}: ${error?.message || String(error)}`);
+                }
+            }
+
+            await fetchData();
+            if (errors.length) {
+                setNoticeDialog({
+                    tone: 'warning',
+                    title: text('Candidate localization completed with issues', 'Localizzazione candidati completata con problemi'),
+                    description: text(
+                        `Updated ${updated} candidates. ${errors.length} candidates could not be localized.`,
+                        `Aggiornati ${updated} candidati. ${errors.length} candidati non sono stati localizzati.`
+                    ),
+                    bullets: errors.slice(0, 4),
+                });
+            } else {
+                setNoticeDialog({
+                    tone: 'info',
+                    title: text('Candidate localization completed', 'Localizzazione candidati completata'),
+                    description: text(
+                        `Updated ${updated} candidate profiles. Existing embeddings were not changed.`,
+                        `Aggiornati ${updated} profili candidato. Gli embedding esistenti non sono stati modificati.`
+                    ),
+                });
+            }
+            showToast(text('Candidate translations updated', 'Traduzioni candidati aggiornate'));
+        } catch (error: any) {
+            setNoticeDialog({
+                tone: 'danger',
+                title: text('Candidate localization failed', 'Localizzazione candidati non riuscita'),
+                description: error?.message || text('The admin console could not localize existing candidates.', 'La console admin non è riuscita a localizzare i candidati esistenti.'),
+            });
+        } finally {
+            setActionLoading((current) => ({ ...current, localizeCandidates: false }));
         }
     };
 
@@ -963,6 +1389,41 @@ const DebugView: React.FC = () => {
         });
     };
 
+    const handleResetPasswordClick = (userId: string, email: string, userType: 'candidate' | 'recruiter') => {
+        setResetPasswordConfirm({ userId, email, userType });
+        setResetPasswordError(null);
+        setResetPasswordForm({
+            password: 'password123!',
+        });
+    };
+
+    const handleResetPasswordConfirm = async () => {
+        if (!resetPasswordConfirm) return;
+
+        setIsResettingPassword(true);
+        setResetPasswordError(null);
+
+        try {
+            const passwordToSet = resetPasswordForm.password.trim() || 'password123!';
+
+            await resetUserPassword(resetPasswordConfirm.userId, passwordToSet);
+            await markUserMustChangePassword(resetPasswordConfirm.userId, resetPasswordConfirm.userType, true);
+
+            setResetPasswordSuccess({
+                email: resetPasswordConfirm.email,
+                password: passwordToSet,
+            });
+            setResetPasswordConfirm(null);
+            
+            // Refresh data to show updated state
+            await fetchData();
+        } catch (error: any) {
+            setResetPasswordError(error?.message || text('Failed to reset password', 'Impossibile resettare la password'));
+        } finally {
+            setIsResettingPassword(false);
+        }
+    };
+
     const runRecomputeAllEmbeddings = async () => {
         setActionLoading(s => ({ ...s, recomputeAll: true }));
         try {
@@ -1204,8 +1665,15 @@ const DebugView: React.FC = () => {
         navigationState?: Record<string, unknown>;
     }) => {
         startImpersonation(target);
+        const highlightJobId = typeof target.navigationState?.highlightJobId === 'string'
+            ? target.navigationState.highlightJobId
+            : null;
         navigate(
-            target.role === 'seeker' ? '/seeker/dashboard' : '/recruiter/dashboard',
+            target.role === 'seeker'
+                ? '/seeker/dashboard'
+                : highlightJobId
+                    ? `/recruiter/dashboard?highlightJobId=${encodeURIComponent(highlightJobId)}`
+                    : '/recruiter/dashboard',
             target.navigationState ? { state: target.navigationState } : undefined
         );
         showToast(text(`Viewing portal as ${target.email}`, `Stai visualizzando il portale come ${target.email}`));
@@ -1980,8 +2448,7 @@ const DebugView: React.FC = () => {
                 setBatchProgress({ kind: 'cv_seekers', current: index, total: seekerProvisionCvFiles.length });
 
                 try {
-                    const cvText = await readFileAsText(file);
-                    const candidateProfile = await extractCvInfo(cvText);
+                    const candidateProfile = await extractCvInfoFromFile(file);
                     const identity = buildProvisionedSeekerIdentity(candidateProfile, file, index);
                     let account: ProvisionedAccountRecord | null = null;
                     let currentEmail = identity.email;
@@ -2163,11 +2630,51 @@ const DebugView: React.FC = () => {
     };
 
     const anyActionLoading = Object.values(actionLoading).some(v => v);
-    const recentActivity = [...candidates, ...jobs]
-        .sort((left, right) => (right.embedding_updated_at || '').localeCompare(left.embedding_updated_at || ''))
-        .slice(0, 6);
+    const logActorOptions = useMemo(() => {
+        const seen = new Map<string, { value: string; label: string }>();
 
-    const adminAndAiLabel = text('Admin and AI model', 'Admin e AI model');
+        activityLogs.forEach((log) => {
+            const value = log.effective_profile_id || log.actor_user_id || log.effective_email || log.actor_email || '';
+            if (!value || seen.has(value)) return;
+
+            seen.set(value, {
+                value,
+                label: log.effective_name || log.effective_email || log.actor_email || text('Unknown user', 'Utente sconosciuto'),
+            });
+        });
+
+        return Array.from(seen.values()).sort((left, right) => left.label.localeCompare(right.label));
+    }, [activityLogs, text]);
+
+    const filteredActivityLogs = useMemo(() => {
+        return activityLogs.filter((log) => {
+            const matchesCategory =
+                logCategoryFilter === 'all' ? true :
+                    logCategoryFilter === 'edge_function' ? log.event_type === 'edge_function_call' :
+                        logCategoryFilter === 'gemini' ? log.event_type === 'gemini_call' :
+                            logCategoryFilter === 'job_created' ? log.event_type === 'job_created' :
+                                ['candidate_profile_created', 'recruiter_created', 'admin_created'].includes(log.event_type);
+
+            if (!matchesCategory) return false;
+
+            if (logActorFilter === 'all') return true;
+
+            return (
+                log.effective_profile_id === logActorFilter ||
+                log.actor_user_id === logActorFilter ||
+                log.effective_email === logActorFilter ||
+                log.actor_email === logActorFilter
+            );
+        });
+    }, [activityLogs, logActorFilter, logCategoryFilter]);
+
+    const recentActivityLogs = useMemo(() => {
+        return activityLogs
+            .filter((log) => ['candidate_profile_created', 'recruiter_created', 'admin_created', 'job_created'].includes(log.event_type))
+            .slice(0, 6);
+    }, [activityLogs]);
+
+    const adminAndAiLabel = text('Settings', 'Settings');
     const searchPlaceholder = {
         exports: text('Search CVs by file name, candidate name, or email', 'Cerca CV per nome file, nome candidato o email'),
         candidates: text('Search candidates by email, name, title, location, or skills', 'Cerca candidati per email, nome, ruolo, località o skill'),
@@ -2190,7 +2697,7 @@ const DebugView: React.FC = () => {
     const databasePercent = getUsagePercent(supabaseUsage?.databaseUsedBytes ?? null, supabaseUsage?.databaseLimitBytes ?? null);
     const storagePercent = getUsagePercent(supabaseUsage?.storageUsedBytes ?? null, supabaseUsage?.storageLimitBytes ?? null);
     const apiRequestsPercent = getUsagePercent(supabaseUsage?.apiRequestsUsed ?? null, supabaseUsage?.apiRequestsLimit ?? null);
-    const aiRequestLimit = parsePositiveCountEnv((import.meta.env as Record<string, unknown>).VITE_AI_REQUEST_LIMIT);
+    const aiRequestLimit = parsePositiveCountEnv((import.meta.env as Record<string, unknown>).VITE_AI_REQUEST_LIMIT, DEFAULT_AI_REQUEST_LIMIT);
     const candidateAiStatusById = new Map(candidates.map((candidate) => [candidate.id, Boolean(candidate.ai_refined)]));
     const aiRequestTargets = Array.from(
         notifications.reduce<Map<string, { candidateId: string }>>((acc, notification) => {
@@ -2331,15 +2838,7 @@ const DebugView: React.FC = () => {
         }
         return note;
     });
-    const aiOverviewNotes =
-        aiRequestLimit === null
-            ? [
-                text(
-                    'Set VITE_AI_REQUEST_LIMIT to compare AI requests sent against your configured AI request budget.',
-                    'Imposta VITE_AI_REQUEST_LIMIT per confrontare le richieste AI inviate con il budget AI configurato.'
-                ),
-            ]
-            : [];
+    const aiOverviewNotes: string[] = [];
 
     return (
         <div className="animate-fade-in w-full relative">
@@ -2659,6 +3158,154 @@ const DebugView: React.FC = () => {
                 </AdminModalShell>
             )}
 
+            {resetPasswordConfirm && (
+                <AdminModalShell maxWidthClassName="max-w-2xl">
+                    <div className="space-y-6 p-6 sm:p-7">
+                        <div className="flex items-start justify-between gap-4">
+                            <div>
+                                <StatusPill tone="warning">Reset Password</StatusPill>
+                                <h3 className="mt-4 text-2xl font-black text-slate-900 dark:text-slate-100">{text('Reset password', 'Resetta password')}</h3>
+                                <p className="mt-3 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+                                    {text('Conferma il reset manuale della password per:', 'Confirm the manual password reset for:')}
+                                </p>
+                                <p className="mt-2 text-base font-semibold text-slate-900 dark:text-slate-100">{resetPasswordConfirm.email}</p>
+                            </div>
+                            <button
+                                onClick={() => {
+                                    if (isResettingPassword) return;
+                                    setResetPasswordConfirm(null);
+                                    setResetPasswordError(null);
+                                }}
+                                className="rounded-2xl px-3 py-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                            >
+                                &times;
+                            </button>
+                        </div>
+
+                        <div className="space-y-4 rounded-2xl border border-amber-200 bg-amber-50/80 p-5 dark:border-amber-900/50 dark:bg-amber-950/20">
+                            <label className="block">
+                                <span className="mb-2 block text-xs font-black uppercase tracking-[0.18em] text-slate-400">
+                                    {text('New temporary password', 'Nuova password temporanea')}
+                                </span>
+                                <input
+                                    type="text"
+                                    value={resetPasswordForm.password}
+                                    onChange={(event) => setResetPasswordForm({ password: event.target.value })}
+                                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:ring-2 focus:ring-orange-500 dark:border-slate-800 dark:bg-slate-900"
+                                />
+                                <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                                    {text('By default it starts from password123!, but you can customize it before confirming. After login the user will be forced into Security settings to replace it.', 'Di default parte da password123!, ma puoi personalizzarla prima di confermare. Dopo il login l’utente verrà forzato nella sezione Sicurezza per sostituirla.')}
+                                </p>
+                            </label>
+                        </div>
+
+                        {resetPasswordError && (
+                            <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">
+                                {resetPasswordError}
+                            </div>
+                        )}
+
+                        <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    if (isResettingPassword) return;
+                                    setResetPasswordConfirm(null);
+                                    setResetPasswordError(null);
+                                }}
+                                className="inline-flex items-center justify-center rounded-2xl border border-slate-200 px-5 py-3 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                            >
+                                {text('Cancel', 'Annulla')}
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleResetPasswordConfirm}
+                                disabled={isResettingPassword}
+                                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-amber-600 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-amber-700 disabled:opacity-50 dark:bg-amber-600 dark:hover:bg-amber-700"
+                            >
+                                {isResettingPassword && <MiniSpinner />}
+                                {text('Replace password', 'Sostituisci password')}
+                            </button>
+                        </div>
+                    </div>
+                </AdminModalShell>
+            )}
+
+            {resetPasswordSuccess && (
+                <AdminModalShell maxWidthClassName="max-w-2xl">
+                    <div className="space-y-6 p-6 sm:p-7">
+                        <div className="flex items-start justify-between gap-4">
+                            <div>
+                                <StatusPill tone="info">Password reset</StatusPill>
+                                <h3 className="mt-4 text-2xl font-black text-slate-900 dark:text-slate-100">
+                                    {text('Password reset successfully', 'Password resettata con successo')}
+                                </h3>
+                                <p className="mt-3 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+                                    {text('La password dell\'utente è stata resettata. Puoi condividere questi dati oppure generare subito la mail formale.', 'The user password has been reset. You can share these credentials or generate the formal email right away.')}
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => setResetPasswordSuccess(null)}
+                                className="rounded-2xl px-3 py-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                            >
+                                &times;
+                            </button>
+                        </div>
+
+                        <div className="space-y-4 rounded-2xl border border-emerald-200 bg-emerald-50/80 p-5 dark:border-emerald-900/50 dark:bg-emerald-950/20">
+                            <div>
+                                <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{text('Email', 'Email')}</p>
+                                <p className="mt-2 break-all text-lg font-semibold text-slate-900 dark:text-slate-100">{resetPasswordSuccess.email}</p>
+                            </div>
+
+                            <div>
+                                <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{text('Password', 'Password')}</p>
+                                <p className="mt-2 break-all text-lg font-semibold text-slate-900 dark:text-slate-100">{resetPasswordSuccess.password}</p>
+                            </div>
+
+                            <div className="rounded-xl border border-dashed border-emerald-300 bg-white/80 p-4 dark:border-emerald-800 dark:bg-slate-900/80">
+                                <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                                    {text('Important notes:', 'Note importanti:')}
+                                </p>
+                                <ul className="mt-3 space-y-2 text-sm text-slate-600 dark:text-slate-300">
+                                    <li className="flex items-start gap-2">
+                                        <span className="mt-1 h-1.5 w-1.5 flex-none rounded-full bg-emerald-500" />
+                                        <span>{text('L\'utente deve cambiare la password al primo accesso', 'User must change password on first login')}</span>
+                                    </li>
+                                    <li className="flex items-start gap-2">
+                                        <span className="mt-1 h-1.5 w-1.5 flex-none rounded-full bg-emerald-500" />
+                                        <span>{text('La sezione password nelle impostazioni sarà obbligatoria', 'Password section in settings will be mandatory')}</span>
+                                    </li>
+                                    <li className="flex items-start gap-2">
+                                        <span className="mt-1 h-1.5 w-1.5 flex-none rounded-full bg-emerald-500" />
+                                        <span>{text('Consiglia all\'utente di scegliere una password sicura', 'Advise the user to choose a strong password')}</span>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+
+                        <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+                            <a
+                                href={buildAdminPasswordResetMailto({
+                                    recipientEmail: resetPasswordSuccess.email,
+                                    loginEmail: resetPasswordSuccess.email,
+                                    temporaryPassword: resetPasswordSuccess.password,
+                                })}
+                                className="inline-flex items-center justify-center rounded-2xl border border-slate-200 px-5 py-3 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                            >
+                                {text('Generate email', 'Genera mail')}
+                            </a>
+                            <button
+                                onClick={() => setResetPasswordSuccess(null)}
+                                className="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-slate-800 dark:bg-white dark:text-slate-900 dark:hover:bg-slate-100"
+                            >
+                                {text('Close', 'Chiudi')}
+                            </button>
+                        </div>
+                    </div>
+                </AdminModalShell>
+            )}
+
             {editEntity && (
                 <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[200] flex items-center justify-center p-4">
                     <div className="bg-white dark:bg-slate-900 w-full max-w-5xl h-[90vh] rounded-3xl shadow-2xl overflow-hidden border dark:border-slate-800 flex flex-col">
@@ -2725,7 +3372,7 @@ const DebugView: React.FC = () => {
                                             <p className="text-sm text-slate-500 mb-6 italic">
                                                 {text(
                                                     `Simple property editor for ${editEntity.type}. For nested changes, use JSON mode.`,
-                                                    `Editor semplice delle proprietà per ${editEntity.type === 'job' ? 'il posting' : editEntity.type === 'candidate' ? 'il seeker' : editEntity.type === 'recruiter' ? 'il recruiter' : "l'utente"}. Per modifiche annidate, usa la modalità JSON.`
+                                                    `Editor semplice delle proprietà per ${(editEntity.type as EntityType) === 'job' ? 'il posting' : (editEntity.type as EntityType) === 'candidate' ? 'il seeker' : (editEntity.type as EntityType) === 'recruiter' ? 'il recruiter' : "l'utente"}. Per modifiche annidate, usa la modalità JSON.`
                                                 )}
                                             </p>
                                             {Object.keys(editEntity.data).map(key => {
@@ -2777,6 +3424,7 @@ const DebugView: React.FC = () => {
                                 <TabButton active={activeTab === 'candidates'} onClick={() => handleSelectTab('candidates')} label={text('Candidates', 'Candidati')} />
                                 <TabButton active={activeTab === 'recruiters'} onClick={() => handleSelectTab('recruiters')} label={text('Recruiters', 'Recruiter')} />
                                 <TabButton active={activeTab === 'jobs'} onClick={() => handleSelectTab('jobs')} label={text('Postings', 'Posting')} />
+                                <TabButton active={activeTab === 'logs'} onClick={() => handleSelectTab('logs')} label={text('Logs', 'Logs')} />
                                 <div className="my-0.5 h-px bg-slate-200 dark:bg-slate-800" />
                                 <TabButton active={activeTab === 'bug_reports'} onClick={() => handleSelectTab('bug_reports')} label={text('Bug Reports', 'Segnalazioni')} />
                                 <TabButton active={activeTab === 'ai_models'} onClick={() => handleSelectTab('ai_models')} label={adminAndAiLabel} />
@@ -2794,6 +3442,7 @@ const DebugView: React.FC = () => {
                         <TabButton active={activeTab === 'candidates'} onClick={() => handleSelectTab('candidates')} label={text('Candidates', 'Candidati')} />
                         <TabButton active={activeTab === 'recruiters'} onClick={() => handleSelectTab('recruiters')} label={text('Recruiters', 'Recruiter')} />
                         <TabButton active={activeTab === 'jobs'} onClick={() => handleSelectTab('jobs')} label={text('Postings', 'Posting')} />
+                        <TabButton active={activeTab === 'logs'} onClick={() => handleSelectTab('logs')} label={text('Logs', 'Logs')} />
                         <div className="h-px bg-slate-200 dark:bg-slate-800 my-0.5" />
                         <TabButton active={activeTab === 'bug_reports'} onClick={() => handleSelectTab('bug_reports')} label={text('Bug Reports', 'Segnalazioni')} />
                         <TabButton active={activeTab === 'ai_models'} onClick={() => handleSelectTab('ai_models')} label={adminAndAiLabel} />
@@ -2860,36 +3509,49 @@ const DebugView: React.FC = () => {
 
                                     <section className="rounded-[30px] border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-950 sm:p-6">
                                         <div className="mb-5 flex flex-col gap-2 sm:mb-6 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-                                            <div>
+                                            <button
+                                                type="button"
+                                                onClick={() => handleSelectTab('logs')}
+                                                className="text-left transition-opacity hover:opacity-80"
+                                            >
                                                 <h2 className="text-xl font-black text-slate-900 dark:text-slate-100 sm:text-2xl">{text('Recent activity', 'Attività recenti')}</h2>
-                                            </div>
-                                            <span className="text-sm text-slate-400">{recentActivity.length} {text('recent records', 'record recenti')}</span>
+                                            </button>
+                                            <span className="text-sm text-slate-400">{recentActivityLogs.length} {text('recent records', 'record recenti')}</span>
                                         </div>
 
                                         <div className="grid gap-4 lg:grid-cols-2">
-                                            {recentActivity.map((item) => (
-                                                <div key={item.id} className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 dark:border-slate-800 dark:bg-slate-900/50 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
-                                                    <div className="min-w-0">
-                                                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400 mb-2">
-                                                            {'title' in item ? text('Posting', 'Posting') : text('Profile', 'Profilo')}
-                                                        </p>
-                                                        <p className="break-words font-semibold text-slate-900 dark:text-slate-100 sm:truncate">
-                                                            {'title' in item ? item.title : formatCandidateName(item)}
-                                                        </p>
-                                                        <p className="break-all text-sm text-slate-500 dark:text-slate-400 sm:truncate">
-                                                            {'title' in item ? item.company_name || text('Company unavailable', 'Azienda non disponibile') : item.contacts?.email || text('Email unavailable', 'Email non disponibile')}
-                                                        </p>
+                                            {recentActivityLogs.map((log) => (
+                                                <button
+                                                    key={log.id}
+                                                    type="button"
+                                                    onClick={() => handleSelectTab('logs')}
+                                                    className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-left transition-colors hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-900/50 dark:hover:bg-slate-900"
+                                                >
+                                                    <div className="flex items-start justify-between gap-4">
+                                                        <div className="min-w-0">
+                                                            <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+                                                                {log.event_type === 'job_created'
+                                                                    ? text('Posting created', 'Posting creato')
+                                                                    : text('Profile created', 'Profilo creato')}
+                                                            </p>
+                                                            <p className="text-sm font-semibold leading-relaxed text-slate-900 dark:text-slate-100">
+                                                                {log.entity_label || log.summary}
+                                                            </p>
+                                                            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                                                                {(log.effective_name || log.effective_email || text('Unknown user', 'Utente sconosciuto'))}
+                                                            </p>
+                                                        </div>
+                                                        <span className="shrink-0 text-xs font-medium text-slate-400">
+                                                            {new Date(log.created_at).toLocaleString()}
+                                                        </span>
                                                     </div>
-                                                    <span className={`self-start rounded-full px-3 py-1 text-xs font-semibold ${item.embedding_updated_at ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'}`}>
-                                                        {item.embedding_updated_at ? text('Embedded', 'Con embedding') : text('Pending', 'In attesa')}
-                                                    </span>
-                                                </div>
+                                                </button>
                                             ))}
 
-                                            {recentActivity.length === 0 && (
+                                            {recentActivityLogs.length === 0 && (
                                                 <EmptyState
                                                     title={text('No recent activity yet', 'Nessuna attività recente')}
-                                                    description={text('Generate a few seekers, recruiters, or postings to populate the console.', 'Genera qualche candidato, recruiter o lavoro per popolare la console.')}
+                                                    description={text('Create a few profiles or postings and they will appear here automatically.', 'Crea qualche profilo o posting e compariranno qui automaticamente.')}
                                                 />
                                             )}
                                         </div>
@@ -2902,8 +3564,7 @@ const DebugView: React.FC = () => {
                                     <section className="rounded-[30px] border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-6 shadow-sm">
                                         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                                             <div>
-                                                <p className="text-[11px] font-black uppercase tracking-[0.24em] text-slate-400">{text('Data Export', 'Esportazione dati')}</p>
-                                                <h2 className="mt-2 text-2xl font-black text-slate-900 dark:text-slate-100">{text('Download datasets for analysis', 'Scarica dataset per analisi')}</h2>
+                                                <h2 className="text-2xl font-black text-slate-900 dark:text-slate-100">{text('Download datasets for analysis', 'Scarica dataset per analisi')}</h2>
                                                 <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
                                                     {text('Export seeker profiles, recruiter profiles, job postings, or one combined dataset ready for offline analysis in notebooks or BI tools.', 'Esporta profili candidati, profili recruiter, lavori o un dataset combinato pronto per analisi offline in notebook o strumenti BI.')}
                                                 </p>
@@ -3325,6 +3986,7 @@ const DebugView: React.FC = () => {
                                                 detail={[candidate.current_seniority_level, formatReadable(candidate.current_job_function), formatLocation(candidate.residence)].filter(Boolean).join(' • ')}
                                                 onEdit={() => handleOpenEdit('candidate', candidate)}
                                                 onDelete={() => handleDelete('candidate', candidate.id)}
+                                                onResetPassword={candidate.contacts?.email ? () => handleResetPasswordClick(candidate.id, candidate.contacts?.email || '', 'candidate') : undefined}
                                                 onLoginAs={candidate.contacts?.email ? () => handleOpenPortalAsUser({
                                                     profileId: candidate.id,
                                                     email: candidate.contacts.email,
@@ -3344,6 +4006,7 @@ const DebugView: React.FC = () => {
                                                 detail={[recruiter.role, recruiter.company_name, formatList(recruiter.sector), formatLocation(recruiter.company_location)].filter(Boolean).join(' • ')}
                                                 onEdit={() => handleOpenEdit('recruiter', recruiter)}
                                                 onDelete={() => handleDelete('recruiter', recruiter.id)}
+                                                onResetPassword={recruiter.email ? () => handleResetPasswordClick(recruiter.id, recruiter.email, 'recruiter') : undefined}
                                                 onLoginAs={recruiter.email ? () => handleOpenPortalAsUser({
                                                     profileId: recruiter.id,
                                                     email: recruiter.email,
@@ -3393,6 +4056,93 @@ const DebugView: React.FC = () => {
 
                             {activeTab === 'bug_reports' && (
                                 <AdminBugReports />
+                            )}
+
+                            {activeTab === 'logs' && (
+                                <div className="space-y-6 animate-fade-in">
+                                    <section className="rounded-[30px] border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-950">
+                                        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                                            <div className="min-w-0 flex-1">
+                                                <h2 className="text-2xl font-black text-slate-900 dark:text-slate-100">{text('System activity timeline', 'Timeline attività di sistema')}</h2>
+
+                                                <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1fr)]">
+                                                    <label className="space-y-2">
+                                                        <span className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-400">
+                                                            {text('Type', 'Tipo')}
+                                                        </span>
+                                                        <select
+                                                            value={logCategoryFilter}
+                                                            onChange={(event) => setLogCategoryFilter(event.target.value as LogCategoryFilter)}
+                                                            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700 outline-none transition-colors focus:ring-2 focus:ring-orange-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
+                                                        >
+                                                            <option value="all">{text('All activity', 'Tutta l’attività')}</option>
+                                                            <option value="edge_function">{text('Edge Functions', 'Edge Function')}</option>
+                                                            <option value="gemini">{text('Gemini', 'Gemini')}</option>
+                                                            <option value="job_created">{text('Posting created', 'Posting creati')}</option>
+                                                            <option value="profile_created">{text('Profiles created', 'Profili creati')}</option>
+                                                        </select>
+                                                    </label>
+
+                                                    <label className="space-y-2">
+                                                        <span className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-400">
+                                                            {text('User', 'Utente')}
+                                                        </span>
+                                                        <select
+                                                            value={logActorFilter}
+                                                            onChange={(event) => setLogActorFilter(event.target.value)}
+                                                            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700 outline-none transition-colors focus:ring-2 focus:ring-orange-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
+                                                        >
+                                                            <option value="all">{text('All users', 'Tutti gli utenti')}</option>
+                                                            {logActorOptions.map((option) => (
+                                                                <option key={option.value} value={option.value}>
+                                                                    {option.label}
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                    </label>
+                                                </div>
+                                            </div>
+
+                                            <button
+                                                type="button"
+                                                onClick={() => void loadActivityLogs()}
+                                                disabled={activityLogsLoading}
+                                                className="inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                                            >
+                                                {activityLogsLoading ? <MiniSpinner /> : <RefreshIcon />}
+                                                {activityLogsLoading ? text('Refreshing...', 'Aggiornamento...') : text('Refresh logs', 'Aggiorna log')}
+                                            </button>
+                                        </div>
+
+                                        {activityLogsError ? (
+                                            <div className="mt-6 rounded-[22px] border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+                                                {activityLogsError}
+                                            </div>
+                                        ) : null}
+
+                                        {activityLogsLoading && activityLogs.length === 0 ? (
+                                            <div className="mt-8 flex min-h-[240px] flex-col items-center justify-center gap-3 rounded-[24px] border border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-900/50">
+                                                <Spinner />
+                                                <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">
+                                                    {text('Loading the latest activity...', 'Caricamento attività più recenti...')}
+                                                </p>
+                                            </div>
+                                        ) : filteredActivityLogs.length > 0 ? (
+                                            <div className="mt-6 space-y-3">
+                                                {filteredActivityLogs.map((log) => (
+                                                    <ActivityLogCard key={log.id} log={log} />
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <div className="mt-6">
+                                                <EmptyState
+                                                    title={text('No matching logs', 'Nessun log corrispondente')}
+                                                    description={text('Try another type or user filter to widen the timeline.', 'Prova un altro filtro per tipo o utente per ampliare la timeline.')}
+                                                />
+                                            </div>
+                                        )}
+                                    </section>
+                                </div>
                             )}
 
                             {activeTab === 'ai_models' && (
@@ -3468,14 +4218,257 @@ const DebugView: React.FC = () => {
                                             <div>
                                                 <p className="text-[11px] font-black uppercase tracking-[0.24em] text-slate-400">{text('AI Modules', 'Moduli AI')}</p>
                                                 <h2 className="mt-2 text-2xl font-black text-slate-900 dark:text-slate-100">{text('Model configuration', 'Configurazione modelli')}</h2>
+                                                <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+                                                    {text(
+                                                        'The selected model is sent to both Gemini projects: the primary key is used first, and the fallback key automatically takes over if the primary project hits quota or spend-cap limits.',
+                                                        'Il modello selezionato viene inviato a entrambi i progetti Gemini: prima viene usata la chiave primaria, e la chiave fallback entra automaticamente in funzione se il progetto principale raggiunge quota o spend cap.'
+                                                    )}
+                                                </p>
+                                            </div>
+
+                                            <div className="flex flex-col gap-2 sm:flex-row lg:flex-col xl:flex-row">
+                                                <button
+                                                    onClick={handleLocalizeExistingCandidates}
+                                                    disabled={actionLoading.localizeCandidates || anyActionLoading}
+                                                    className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-2xl border border-orange-200 dark:border-orange-900 bg-orange-50 dark:bg-orange-950/40 text-orange-700 dark:text-orange-200 text-sm font-semibold hover:bg-orange-100 dark:hover:bg-orange-950 transition-all disabled:opacity-50"
+                                                >
+                                                    {actionLoading.localizeCandidates ? <><MiniSpinner /> {text('Translating...', 'Traduzione...')}</> : text('Translate candidates IT/EN', 'Traduci candidati IT/EN')}
+                                                </button>
+                                                <button
+                                                    onClick={handleRecomputeAllEmbeddings}
+                                                    disabled={actionLoading.recomputeAll || anyActionLoading}
+                                                    className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-2xl border border-indigo-200 dark:border-indigo-900 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-200 text-sm font-semibold hover:bg-indigo-100 dark:hover:bg-indigo-950 transition-all disabled:opacity-50"
+                                                >
+                                                    {actionLoading.recomputeAll ? <><MiniSpinner /> {text('Recomputing...', 'Ricalcolo...')}</> : text('Recompute All Embeddings', 'Ricalcola tutti gli embedding')}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="rounded-[30px] border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-6 shadow-sm">
+                                        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                                            <div className="max-w-3xl">
+                                                <p className="text-[11px] font-black uppercase tracking-[0.24em] text-slate-400">{text('Email', 'Email')}</p>
+                                                <h3 className="mt-2 text-2xl font-black text-slate-900 dark:text-slate-100">{text('Email', 'Email')}</h3>
+                                                <p className="mt-2 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+                                                    {text(
+                                                        'When this switch is off, PeakTalent keeps saving requests and notifications, but every outgoing email sent through the PeakTalent mailbox is paused before the server tries to deliver it.',
+                                                        'Quando questo switch è off, PeakTalent continua a salvare richieste e notifiche, ma tutte le email in uscita inviate tramite la casella PeakTalent vengono messe in pausa prima che il server provi a recapitarle.'
+                                                    )}
+                                                </p>
+                                                <p className={`mt-3 text-sm font-semibold ${emailSendingEnabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                                                    {isEmailSettingLoading
+                                                        ? text('Loading current email state...', 'Caricamento stato email...')
+                                                        : emailSendingEnabled
+                                                            ? text('Email delivery is active.', 'L’invio email è attivo.')
+                                                            : text('Email delivery is paused.', 'L’invio email è in pausa.')}
+                                                </p>
+                                                {emailSettingError && (
+                                                    <p className="mt-2 text-sm text-red-500 dark:text-red-400">{emailSettingError}</p>
+                                                )}
                                             </div>
 
                                             <button
-                                                onClick={handleRecomputeAllEmbeddings}
-                                                disabled={actionLoading.recomputeAll || anyActionLoading}
-                                                className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-2xl border border-indigo-200 dark:border-indigo-900 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-200 text-sm font-semibold hover:bg-indigo-100 dark:hover:bg-indigo-950 transition-all disabled:opacity-50"
+                                                type="button"
+                                                role="switch"
+                                                aria-checked={emailSendingEnabled}
+                                                onClick={handleToggleEmailSending}
+                                                disabled={isEmailSettingLoading || isEmailSettingSaving}
+                                                className={`inline-flex min-w-[132px] items-center justify-between gap-4 rounded-full border px-4 py-3 text-sm font-black uppercase tracking-[0.2em] transition-all ${
+                                                    emailSendingEnabled
+                                                        ? 'border-orange-300 bg-orange-50 text-orange-700 dark:border-orange-800 dark:bg-orange-950/40 dark:text-orange-200'
+                                                        : 'border-slate-200 bg-slate-100 text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300'
+                                                } disabled:opacity-60`}
                                             >
-                                                {actionLoading.recomputeAll ? <><MiniSpinner /> {text('Recomputing...', 'Ricalcolo...')}</> : text('Recompute All Embeddings', 'Ricalcola tutti gli embedding')}
+                                                <span>
+                                                    {isEmailSettingSaving
+                                                        ? text('Saving', 'Salvataggio')
+                                                        : emailSendingEnabled
+                                                            ? text('On', 'On')
+                                                            : text('Off', 'Off')}
+                                                </span>
+                                                <span
+                                                    className={`relative inline-flex h-7 w-12 rounded-full transition-colors ${
+                                                        emailSendingEnabled ? 'bg-orange-500' : 'bg-slate-300 dark:bg-slate-700'
+                                                    }`}
+                                                >
+                                                    <span
+                                                        className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                                            emailSendingEnabled ? 'translate-x-6' : 'translate-x-1'
+                                                        }`}
+                                                    />
+                                                </span>
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <div className="rounded-[30px] border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-6 shadow-sm">
+                                        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                                            <div className="max-w-3xl">
+                                                <p className="text-[11px] font-black uppercase tracking-[0.24em] text-slate-400">{text('Access', 'Accesso')}</p>
+                                                <h3 className="mt-2 text-2xl font-black text-slate-900 dark:text-slate-100">{text('Google and Apple login', 'Login Google e Apple')}</h3>
+                                                <p className="mt-2 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+                                                    {text(
+                                                        'Keep this off until the Google and Apple developer accounts are created and configured in Supabase. When off, candidates only see email and password login/registration.',
+                                                        'Lascialo off finché non vengono creati e configurati su Supabase gli account Google e Apple. Quando è off, i candidati vedono solo login/registrazione con email e password.'
+                                                    )}
+                                                </p>
+                                                <p className={`mt-3 text-sm font-semibold ${seekerOAuthEnabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                                                    {isSeekerOAuthLoading
+                                                        ? text('Loading Google/Apple access state...', 'Caricamento stato accesso Google/Apple...')
+                                                        : seekerOAuthEnabled
+                                                            ? text('Google and Apple buttons are visible to candidates.', 'I pulsanti Google e Apple sono visibili ai candidati.')
+                                                            : text('Google and Apple buttons are hidden. Missing Google/Apple account setup for now.', 'I pulsanti Google e Apple sono nascosti. Per ora manca da creare/configurare gli account Google e Apple.')}
+                                                </p>
+                                                {seekerOAuthError && (
+                                                    <p className="mt-2 text-sm text-red-500 dark:text-red-400">{seekerOAuthError}</p>
+                                                )}
+                                            </div>
+
+                                            <button
+                                                type="button"
+                                                role="switch"
+                                                aria-checked={seekerOAuthEnabled}
+                                                onClick={handleToggleSeekerOAuth}
+                                                disabled={isSeekerOAuthLoading || isSeekerOAuthSaving}
+                                                className={`inline-flex min-w-[132px] items-center justify-between gap-4 rounded-full border px-4 py-3 text-sm font-black uppercase tracking-[0.2em] transition-all ${
+                                                    seekerOAuthEnabled
+                                                        ? 'border-orange-300 bg-orange-50 text-orange-700 dark:border-orange-800 dark:bg-orange-950/40 dark:text-orange-200'
+                                                        : 'border-slate-200 bg-slate-100 text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300'
+                                                } disabled:opacity-60`}
+                                            >
+                                                <span>
+                                                    {isSeekerOAuthSaving
+                                                        ? text('Saving', 'Salvataggio')
+                                                        : seekerOAuthEnabled
+                                                            ? text('On', 'On')
+                                                            : text('Off', 'Off')}
+                                                </span>
+                                                <span
+                                                    className={`relative inline-flex h-7 w-12 rounded-full transition-colors ${
+                                                        seekerOAuthEnabled ? 'bg-orange-500' : 'bg-slate-300 dark:bg-slate-700'
+                                                    }`}
+                                                >
+                                                    <span
+                                                        className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                                            seekerOAuthEnabled ? 'translate-x-6' : 'translate-x-1'
+                                                        }`}
+                                                    />
+                                                </span>
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <div className="rounded-[30px] border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-6 shadow-sm">
+                                        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                                            <div className="max-w-3xl">
+                                                <p className="text-[11px] font-black uppercase tracking-[0.24em] text-slate-400">{text('Recruiter candidates', 'Candidati recruiter')}</p>
+                                                <h3 className="mt-2 text-2xl font-black text-slate-900 dark:text-slate-100">{text('All candidates option', 'Opzione tutti i candidati')}</h3>
+                                                <p className="mt-2 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+                                                    {text(
+                                                        'When this switch is on, recruiters can also use the third scope in ranking to browse every candidate on the platform. When it is off, recruiters only see candidates who showed interest in the current role or candidates who already showed interest in at least one of their positions. Admins still always see all three scopes.',
+                                                        'Quando questo switch è on, i recruiter possono usare anche la terza opzione del ranking per vedere tutti i candidati della piattaforma. Quando è off, i recruiter vedono solo chi ha mostrato interesse per il ruolo corrente oppure chi ha mostrato interesse in almeno una delle loro posizioni. Gli admin continuano comunque a vedere sempre tutte e tre le opzioni.'
+                                                    )}
+                                                </p>
+                                                <p className={`mt-3 text-sm font-semibold ${recruiterAllCandidatesEnabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                                                    {isRecruiterAllCandidatesLoading
+                                                        ? text('Loading recruiter visibility state...', 'Caricamento stato visibilità recruiter...')
+                                                        : recruiterAllCandidatesEnabled
+                                                            ? text('Recruiters can open the all candidates scope.', 'I recruiter possono aprire la vista tutti i candidati.')
+                                                            : text('Recruiters only see their own candidate scopes.', 'I recruiter vedono solo i propri scope candidati.')}
+                                                </p>
+                                                {recruiterAllCandidatesError && (
+                                                    <p className="mt-2 text-sm text-red-500 dark:text-red-400">{recruiterAllCandidatesError}</p>
+                                                )}
+                                            </div>
+
+                                            <button
+                                                type="button"
+                                                role="switch"
+                                                aria-checked={recruiterAllCandidatesEnabled}
+                                                onClick={handleToggleRecruiterAllCandidates}
+                                                disabled={isRecruiterAllCandidatesLoading || isRecruiterAllCandidatesSaving}
+                                                className={`inline-flex min-w-[132px] items-center justify-between gap-4 rounded-full border px-4 py-3 text-sm font-black uppercase tracking-[0.2em] transition-all ${
+                                                    recruiterAllCandidatesEnabled
+                                                        ? 'border-orange-300 bg-orange-50 text-orange-700 dark:border-orange-800 dark:bg-orange-950/40 dark:text-orange-200'
+                                                        : 'border-slate-200 bg-slate-100 text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300'
+                                                } disabled:opacity-60`}
+                                            >
+                                                <span>
+                                                    {isRecruiterAllCandidatesSaving
+                                                        ? text('Saving', 'Salvataggio')
+                                                        : recruiterAllCandidatesEnabled
+                                                            ? text('On', 'On')
+                                                            : text('Off', 'Off')}
+                                                </span>
+                                                <span
+                                                    className={`relative inline-flex h-7 w-12 rounded-full transition-colors ${
+                                                        recruiterAllCandidatesEnabled ? 'bg-orange-500' : 'bg-slate-300 dark:bg-slate-700'
+                                                    }`}
+                                                >
+                                                    <span
+                                                        className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                                            recruiterAllCandidatesEnabled ? 'translate-x-6' : 'translate-x-1'
+                                                        }`}
+                                                    />
+                                                </span>
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <div className="rounded-[30px] border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-6 shadow-sm">
+                                        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                                            <div className="max-w-3xl">
+                                                <p className="text-[11px] font-black uppercase tracking-[0.24em] text-slate-400">{text('Candidate settings', 'Impostazioni candidati')}</p>
+                                                <h3 className="mt-2 text-2xl font-black text-slate-900 dark:text-slate-100">{text('Profile visibility setting', 'Impostazione visibilità profilo')}</h3>
+                                                <p className="mt-2 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+                                                    {text(
+                                                        'When this switch is off, candidates do not see the profile visibility control and every profile is treated as visible to recruiters. When it is on, candidates can choose whether their profile is visible or private.',
+                                                        'Quando questo switch è off, i candidati non vedono il controllo di visibilità profilo e ogni profilo viene trattato come visibile ai recruiter. Quando è on, i candidati possono scegliere se rendere il profilo visibile o privato.'
+                                                    )}
+                                                </p>
+                                                <p className={`mt-3 text-sm font-semibold ${candidateProfileVisibilitySettingEnabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                                                    {isCandidateProfileVisibilitySettingLoading
+                                                        ? text('Loading candidate visibility state...', 'Caricamento stato visibilità candidati...')
+                                                        : candidateProfileVisibilitySettingEnabled
+                                                            ? text('Candidates can manage profile visibility.', 'I candidati possono gestire la visibilità profilo.')
+                                                            : text('Profile visibility is hidden and profiles are active by default.', 'La visibilità profilo è nascosta e i profili sono attivi di default.')}
+                                                </p>
+                                                {candidateProfileVisibilitySettingError && (
+                                                    <p className="mt-2 text-sm text-red-500 dark:text-red-400">{candidateProfileVisibilitySettingError}</p>
+                                                )}
+                                            </div>
+
+                                            <button
+                                                type="button"
+                                                role="switch"
+                                                aria-checked={candidateProfileVisibilitySettingEnabled}
+                                                onClick={handleToggleCandidateProfileVisibilitySetting}
+                                                disabled={isCandidateProfileVisibilitySettingLoading || isCandidateProfileVisibilitySettingSaving}
+                                                className={`inline-flex min-w-[132px] items-center justify-between gap-4 rounded-full border px-4 py-3 text-sm font-black uppercase tracking-[0.2em] transition-all ${
+                                                    candidateProfileVisibilitySettingEnabled
+                                                        ? 'border-orange-300 bg-orange-50 text-orange-700 dark:border-orange-800 dark:bg-orange-950/40 dark:text-orange-200'
+                                                        : 'border-slate-200 bg-slate-100 text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300'
+                                                } disabled:opacity-60`}
+                                            >
+                                                <span>
+                                                    {isCandidateProfileVisibilitySettingSaving
+                                                        ? text('Saving', 'Salvataggio')
+                                                        : candidateProfileVisibilitySettingEnabled
+                                                            ? text('On', 'On')
+                                                            : text('Off', 'Off')}
+                                                </span>
+                                                <span
+                                                    className={`relative inline-flex h-7 w-12 rounded-full transition-colors ${
+                                                        candidateProfileVisibilitySettingEnabled ? 'bg-orange-500' : 'bg-slate-300 dark:bg-slate-700'
+                                                    }`}
+                                                >
+                                                    <span
+                                                        className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                                            candidateProfileVisibilitySettingEnabled ? 'translate-x-6' : 'translate-x-1'
+                                                        }`}
+                                                    />
+                                                </span>
                                             </button>
                                         </div>
                                     </div>
@@ -3625,6 +4618,89 @@ const TabButton = ({ active, onClick, label, count }: { active: boolean; onClick
     </button>
 );
 
+const formatLogPurposeLabel = (value?: string | null) =>
+    (value || '')
+        .replace(/^job_/, '')
+        .replace(/^candidate_/, '')
+        .replace(/^recruiter_/, '')
+        .replace(/_/g, ' ')
+        .trim();
+
+const ActivityLogCard: React.FC<{ log: ActivityLogRecord }> = ({ log }) => {
+    const { text } = useLanguage();
+    const eventLabelMap: Record<string, string> = {
+        gemini_call: text('Gemini', 'Gemini'),
+        edge_function_call: text('Edge Function', 'Edge Function'),
+        candidate_profile_created: text('Candidate Created', 'Candidato creato'),
+        candidate_profile_saved: text('Candidate Profile', 'Profilo candidato'),
+        recruiter_created: text('Recruiter Created', 'Recruiter creato'),
+        recruiter_profile_saved: text('Recruiter Profile', 'Profilo recruiter'),
+        admin_created: text('Admin Created', 'Admin creato'),
+        job_created: text('Posting Created', 'Posting creato'),
+        job_updated: text('Posting Updated', 'Posting aggiornato'),
+    };
+
+    const eventLabel = eventLabelMap[log.event_type] || formatLogPurposeLabel(log.event_type) || text('Activity', 'Attività');
+    const actorLabel = log.effective_name || log.effective_email || log.actor_email || text('Unknown user', 'Utente sconosciuto');
+    const purposeLabel = formatLogPurposeLabel(log.purpose) || text('general operation', 'operazione generale');
+    const providerLabel = log.provider_slot === 'fallback'
+        ? text('Fallback', 'Fallback')
+        : log.provider_slot === 'primary'
+            ? text('Primary', 'Primaria')
+            : null;
+    const errorMessage = typeof log.metadata?.error_message === 'string' ? log.metadata.error_message : '';
+
+    return (
+        <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-4 py-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/60">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                        <span className={`inline-flex rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${log.status === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-300' : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'}`}>
+                            {eventLabel}
+                        </span>
+                        {log.function_name && (
+                            <span className="inline-flex rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-slate-500 dark:bg-slate-950 dark:text-slate-400">
+                                {log.function_name}
+                            </span>
+                        )}
+                        {providerLabel && (
+                            <span className={`inline-flex rounded-full px-3 py-1 text-[11px] font-semibold ${log.provider_slot === 'fallback' ? 'bg-orange-100 text-orange-700 dark:bg-orange-950/40 dark:text-orange-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300'}`}>
+                                {providerLabel}
+                            </span>
+                        )}
+                        {log.model_id && (
+                            <span className="inline-flex rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-slate-500 dark:bg-slate-950 dark:text-slate-400">
+                                {log.model_id.replace(/^models\//, '')}
+                            </span>
+                        )}
+                    </div>
+
+                    <p className="mt-3 text-sm font-semibold leading-relaxed text-slate-900 dark:text-slate-100">
+                        {log.summary}
+                    </p>
+
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
+                        <span>{text('Who', 'Chi')}: {actorLabel}</span>
+                        <span>{text('Purpose', 'Scopo')}: {purposeLabel}</span>
+                        {log.entity_label && <span>{text('Entity', 'Entità')}: {log.entity_label}</span>}
+                        {log.is_impersonating && <span>{text('Admin impersonation', 'Impersonazione admin')}</span>}
+                    </div>
+
+                    {log.status === 'error' && errorMessage && (
+                        <p className="mt-3 rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+                            {errorMessage}
+                        </p>
+                    )}
+                </div>
+
+                <span className="shrink-0 text-xs font-medium text-slate-400">
+                    {new Date(log.created_at).toLocaleString()}
+                </span>
+            </div>
+        </div>
+    );
+};
+
 const OverviewMetric = ({
     icon,
     label,
@@ -3712,10 +4788,10 @@ const formatCount = (value: number | null) => {
     return new Intl.NumberFormat('en-US').format(Math.max(0, Math.round(value)));
 };
 
-const parsePositiveCountEnv = (value: unknown) => {
-    if (typeof value !== 'string') return null;
+const parsePositiveCountEnv = (value: unknown, fallback: number | null = null) => {
+    if (typeof value !== 'string') return fallback;
     const parsed = Number(value.trim());
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
 const formatUsageRatio = (used: number | null, limit: number | null) => {
@@ -4009,6 +5085,7 @@ interface EntityCardProps {
     onEdit?: () => void;
     onDelete: () => void;
     onLoginAs?: () => void;
+    onResetPassword?: () => void;
     editTitle?: string;
     loginTitle?: string;
 }
@@ -4023,6 +5100,7 @@ const EntityCard: React.FC<EntityCardProps> = ({
     onEdit,
     onDelete,
     onLoginAs,
+    onResetPassword,
     editTitle,
     loginTitle,
 }) => {
@@ -4049,6 +5127,11 @@ const EntityCard: React.FC<EntityCardProps> = ({
                     {onLoginAs && (
                         <button onClick={onLoginAs} className="p-2 text-slate-400 hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-950 rounded-xl transition-all" title={loginTitle || text('Open portal as this user', 'Apri il portale come questo utente')}>
                             <LoginIcon />
+                        </button>
+                    )}
+                    {onResetPassword && (
+                        <button onClick={onResetPassword} className="p-2 text-slate-400 hover:text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-950 rounded-xl transition-all" title={text('Reset password', 'Resetta password')}>
+                            <KeyIcon />
                         </button>
                     )}
                     {onEdit && (

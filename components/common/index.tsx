@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { CandidateProfile, MatchScoreBreakdown } from '../../types';
 import { formatCandidateName } from '../../utils/nameFormat';
 import { useLanguage } from '../LanguageProvider';
@@ -9,6 +10,31 @@ export const Spinner = () => (
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange-500"></div>
     </div>
 );
+
+/**
+ * Lightweight page placeholder used as Suspense fallback while a lazy route
+ * chunk is downloading, and as a generic profile-loading screen. Reuses the
+ * Tailwind `animate-pulse` utility so it weighs nothing.
+ */
+export const PageSkeleton: React.FC<{ variant?: 'dashboard' | 'detail' }> = ({ variant = 'dashboard' }) => {
+    const cardCount = variant === 'detail' ? 2 : 3;
+    return (
+        <div className="mx-auto w-full max-w-6xl animate-pulse px-4 py-8 sm:px-6 lg:px-8" aria-hidden="true">
+            <div className="mb-6 h-8 w-48 rounded-lg bg-slate-200 dark:bg-slate-800" />
+            <div className="mb-8 h-4 w-72 rounded bg-slate-200/70 dark:bg-slate-800/70" />
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {Array.from({ length: cardCount }).map((_, i) => (
+                    <div key={i} className="rounded-2xl border border-slate-200/60 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+                        <div className="mb-3 h-5 w-32 rounded bg-slate-200 dark:bg-slate-800" />
+                        <div className="mb-2 h-3 w-full rounded bg-slate-200/70 dark:bg-slate-800/70" />
+                        <div className="mb-2 h-3 w-5/6 rounded bg-slate-200/70 dark:bg-slate-800/70" />
+                        <div className="h-3 w-3/4 rounded bg-slate-200/70 dark:bg-slate-800/70" />
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
 
 export const LoadingScreen: React.FC<{ messages: string[] }> = ({ messages }) => {
     const [currentIndex, setCurrentIndex] = useState(0);
@@ -121,13 +147,15 @@ export const CandidateCard: React.FC<{
     effectiveScorePercent?: number;
     rankNumber?: number;
     questionnaireScore?: number | null;
+    showQuestionnaireMetric?: boolean;
     isLocked?: boolean;
     profileAction?: React.ReactNode;
     nextStepAction?: React.ReactNode;
     recruiterOverride?: { score: number; reason?: string } | null;
     onEditOverride?: () => void;
     onOpenProfile?: () => void;
-}> = ({ candidate, scoreDetails, effectiveScorePercent, rankNumber, questionnaireScore, isLocked = false, profileAction, nextStepAction, recruiterOverride, onEditOverride, onOpenProfile }) => {
+    headerActions?: React.ReactNode;
+}> = ({ candidate, scoreDetails, effectiveScorePercent, rankNumber, questionnaireScore, showQuestionnaireMetric = true, isLocked = false, profileAction, nextStepAction, recruiterOverride, onEditOverride, onOpenProfile, headerActions }) => {
     const { text } = useLanguage();
     const [isExpanded, setIsExpanded] = useState(false);
     const aiScore = Math.round(scoreDetails.finalScore * 100);
@@ -138,39 +166,37 @@ export const CandidateCard: React.FC<{
         {
             label: 'AI Semantic Alignment',
             score: scoreDetails.semanticScore,
-            weight: 40,
+            weight: Math.round(scoreDetails.weights.semantic * 100),
         },
         {
-            label: 'Skills Match',
+            label: 'Hard Skills',
             score: scoreDetails.hardSkillsScore,
-            weight: 20,
-        },
-        {
-            label: 'Experience & Seniority',
-            score: scoreDetails.experienceScore,
-            weight: 10,
+            weight: Math.round(scoreDetails.weights.hard * 100),
         },
         {
             label: 'Industry Alignment',
             score: scoreDetails.industryScore,
-            weight: 10,
+            weight: Math.round(scoreDetails.weights.industry * 100),
         },
         {
             label: 'Career Prestige',
             score: scoreDetails.careerPrestigeScore,
-            weight: 10,
+            weight: Math.round(scoreDetails.weights.careerPrestige * 100),
         },
         {
             label: 'Education Quality',
             score: scoreDetails.educationScore,
-            weight: 10,
+            weight: Math.round(scoreDetails.weights.education * 100),
         },
-        {
+    ];
+
+    if (showQuestionnaireMetric) {
+        breakdownItems.push({
             label: text('Role Questionnaire', 'Questionario sul ruolo'),
             score: typeof questionnaireScore === 'number' ? Math.max(0, Math.min(1, questionnaireScore / 100)) : 0,
             weight: 0,
-        },
-    ];
+        });
+    }
 
     const latestExperience = experiences.find(exp => exp.is_current_position) || experiences[0];
     const matchBand = displayedScore >= 60
@@ -185,13 +211,19 @@ export const CandidateCard: React.FC<{
                 ringClass: 'text-green-500 dark:text-green-400',
                 labelClass: 'text-green-600 dark:text-green-300',
             }
-            : {
-                label: text('Not fit', 'Basso'),
-                ringClass: 'text-rose-500',
-                labelClass: 'text-rose-600 dark:text-rose-300',
-            };
+            : displayedScore >= 40
+                ? {
+                    label: text('Average', 'Medio'),
+                    ringClass: 'text-orange-500 dark:text-orange-400',
+                    labelClass: 'text-orange-600 dark:text-orange-300',
+                }
+                : {
+                    label: text('Not fit', 'Basso'),
+                    ringClass: 'text-rose-500',
+                    labelClass: 'text-rose-600 dark:text-rose-300',
+                };
 
-    const isCardClickable = !isLocked && Boolean(onOpenProfile);
+    const isCardClickable = !isLocked;
     const stopCardOpen = (event: React.MouseEvent<HTMLElement>) => {
         event.stopPropagation();
     };
@@ -199,17 +231,85 @@ export const CandidateCard: React.FC<{
         event.stopPropagation();
         setIsExpanded((current) => !current);
     };
+    const handleCardClick = () => {
+        if (onOpenProfile) {
+            onOpenProfile();
+            return;
+        }
+        setIsExpanded((current) => !current);
+    };
+    const handleCardKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            handleCardClick();
+        }
+    };
+    const scoreRingNode = (
+        <>
+            <div
+                className={`relative h-[76px] w-[76px] sm:h-[84px] sm:w-[84px] ${!isLocked ? 'cursor-pointer' : ''}`}
+                onClick={!isLocked ? toggleBreakdown : undefined}
+                onKeyDown={!isLocked ? (event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        toggleBreakdown(event);
+                    }
+                } : undefined}
+                role={!isLocked ? 'button' : undefined}
+                tabIndex={!isLocked ? 0 : undefined}
+                aria-label={!isLocked ? (isExpanded ? text('Hide score details', 'Nascondi dettaglio punteggio') : text('Show score details', 'Mostra dettaglio punteggio')) : undefined}
+            >
+                <svg className="h-full w-full" viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="18" cy="18" r="16" fill="none" className="stroke-current text-slate-100 dark:text-slate-800" strokeWidth="3"></circle>
+                    <circle cx="18" cy="18" r="16" fill="none" className={`stroke-current ${recruiterOverride ? 'text-violet-500 dark:text-violet-400' : matchBand.ringClass}`} strokeWidth="3" strokeDasharray={`${displayedScore}, 100`} strokeLinecap="round" transform="rotate(-90 18 18)"></circle>
+                </svg>
+                <span className="absolute inset-0 flex items-center justify-center">
+                    <span className={`text-base font-black sm:text-lg ${recruiterOverride ? 'text-violet-600 dark:text-violet-300' : 'text-slate-800 dark:text-slate-100'}`}>{displayedScore}%</span>
+                </span>
+                {!isLocked && (
+                    <span
+                        className={`absolute bottom-[0.725rem] left-1/2 inline-flex -translate-x-1/2 items-center justify-center transition-colors pointer-events-none ${recruiterOverride ? 'text-violet-500 dark:text-violet-400' : 'text-slate-500 dark:text-slate-400'}`}
+                    >
+                        <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            className="h-5 w-5"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                        >
+                            <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2.2}
+                                d={isExpanded ? 'M5 15l7-7 7 7' : 'M19 9l-7 7-7-7'}
+                            />
+                        </svg>
+                    </span>
+                )}
+            </div>
+            {!isLocked && onEditOverride && (
+                <button
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onEditOverride();
+                    }}
+                    title={text('Edit', 'Modifica')}
+                    className="text-[9px] font-semibold text-slate-400 hover:text-violet-500 transition-colors flex items-center gap-0.5"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536M9 13l6.586-6.586a2 2 0 012.828 2.828L11.828 15.828a2 2 0 01-1.414.586H9v-2a2 2 0 01.586-1.414z" />
+                    </svg>
+                    {text('Edit', 'Modifica')}
+                </button>
+            )}
+        </>
+    );
 
     return (
         <div
-            className={`overflow-hidden rounded-2xl border border-slate-200 bg-white p-4 shadow-lg transition-all group dark:border-slate-700 dark:bg-slate-800 ${isCardClickable ? 'cursor-pointer hover:-translate-y-0.5 hover:border-orange-200 hover:shadow-xl dark:hover:border-orange-500/30' : ''}`}
-            onClick={isCardClickable ? onOpenProfile : undefined}
-            onKeyDown={isCardClickable ? (event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    onOpenProfile?.();
-                }
-            } : undefined}
+            className={`overflow-hidden rounded-[28px] border border-slate-300 bg-white p-4 shadow-lg transition-all group dark:border-slate-600 dark:bg-slate-800 ${isCardClickable ? 'cursor-pointer hover:border-slate-400 hover:shadow-xl dark:hover:border-slate-500' : ''}`}
+            onClick={isCardClickable ? handleCardClick : undefined}
+            onKeyDown={isCardClickable ? handleCardKeyDown : undefined}
             role={isCardClickable ? 'button' : undefined}
             tabIndex={isCardClickable ? 0 : undefined}
         >
@@ -230,8 +330,36 @@ export const CandidateCard: React.FC<{
                             {latestExperience.role} <span className="opacity-50">at</span> {latestExperience.company}
                         </p>
                     )}
-                    {nextStepAction && (
-                        <div className="mt-3 max-w-[640px]" onClick={stopCardOpen}>
+                    {(headerActions || nextStepAction) && (
+                        <div className="mt-3 flex flex-wrap items-center gap-2" onClick={stopCardOpen}>
+                            {headerActions}
+                            {nextStepAction && (
+                                <div className="hidden sm:ml-3 sm:block">
+                                    {nextStepAction}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {nextStepAction ? (
+                        <div className="mt-3 flex items-stretch gap-3 sm:hidden">
+                            <div className="min-w-0 flex-1" onClick={stopCardOpen}>
+                                {nextStepAction}
+                            </div>
+                            <div className="flex w-[76px] flex-shrink-0 flex-col items-center justify-start gap-1">
+                                {scoreRingNode}
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="mt-3 flex justify-end sm:hidden">
+                            <div className="flex w-[76px] flex-shrink-0 flex-col items-center justify-start gap-1">
+                                {scoreRingNode}
+                            </div>
+                        </div>
+                    )}
+
+                    {nextStepAction && !headerActions && (
+                        <div className="mt-3 hidden max-w-[640px] sm:block" onClick={stopCardOpen}>
                             {nextStepAction}
                         </div>
                     )}
@@ -242,65 +370,8 @@ export const CandidateCard: React.FC<{
                         </div>
                     )}
                 </div>
-                <div className="flex self-end sm:self-auto sm:ml-2 flex-shrink-0 flex-col items-center gap-1">
-                    {/* AI score ring */}
-                    <div
-                        className={`relative h-[76px] w-[76px] sm:h-[84px] sm:w-[84px] ${!isLocked ? 'cursor-pointer' : ''}`}
-                        onClick={!isLocked ? toggleBreakdown : undefined}
-                        onKeyDown={!isLocked ? (event) => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                                event.preventDefault();
-                                toggleBreakdown(event);
-                            }
-                        } : undefined}
-                        role={!isLocked ? 'button' : undefined}
-                        tabIndex={!isLocked ? 0 : undefined}
-                        aria-label={!isLocked ? (isExpanded ? text('Hide score details', 'Nascondi dettaglio punteggio') : text('Show score details', 'Mostra dettaglio punteggio')) : undefined}
-                    >
-                        <svg className="h-full w-full" viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">
-                            <circle cx="18" cy="18" r="16" fill="none" className="stroke-current text-slate-100 dark:text-slate-800" strokeWidth="3"></circle>
-                            <circle cx="18" cy="18" r="16" fill="none" className={`stroke-current ${recruiterOverride ? 'text-violet-500 dark:text-violet-400' : matchBand.ringClass}`} strokeWidth="3" strokeDasharray={`${displayedScore}, 100`} strokeLinecap="round" transform="rotate(-90 18 18)"></circle>
-                        </svg>
-                        <span className="absolute inset-0 flex items-center justify-center">
-                            <span className={`text-base font-black sm:text-lg ${recruiterOverride ? 'text-violet-600 dark:text-violet-300' : 'text-slate-800 dark:text-slate-100'}`}>{displayedScore}%</span>
-                        </span>
-                        {!isLocked && (
-                            <span
-                                className={`absolute bottom-[0.725rem] left-1/2 inline-flex -translate-x-1/2 items-center justify-center transition-colors pointer-events-none ${recruiterOverride ? 'text-violet-500 dark:text-violet-400' : 'text-slate-500 dark:text-slate-400'}`}
-                            >
-                                <svg
-                                    xmlns="http://www.w3.org/2000/svg"
-                                    className="h-5 w-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                >
-                                    <path
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                        strokeWidth={2.2}
-                                        d={isExpanded ? 'M5 15l7-7 7 7' : 'M19 9l-7 7-7-7'}
-                                    />
-                                </svg>
-                            </span>
-                        )}
-                    </div>
-                    {/* Override edit button */}
-                    {!isLocked && onEditOverride && (
-                        <button
-                            onClick={(event) => {
-                                event.stopPropagation();
-                                onEditOverride();
-                            }}
-                            title={text('Edit', 'Modifica')}
-                            className="text-[9px] font-semibold text-slate-400 hover:text-violet-500 transition-colors flex items-center gap-0.5"
-                        >
-                            <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536M9 13l6.586-6.586a2 2 0 012.828 2.828L11.828 15.828a2 2 0 01-1.414.586H9v-2a2 2 0 01.586-1.414z" />
-                            </svg>
-                            {text('Edit', 'Modifica')}
-                        </button>
-                    )}
+                <div className="hidden self-end flex-shrink-0 flex-col items-center gap-1 sm:ml-2 sm:flex sm:self-auto">
+                    {scoreRingNode}
                 </div>
             </div>
 
@@ -321,8 +392,8 @@ export const CandidateCard: React.FC<{
     );
 };
 
-interface ScoreBarProps { label: string; score: number; weight: number }
-const ScoreBar: React.FC<ScoreBarProps> = ({ label, score, weight }) => (
+export interface ScoreBarProps { label: string; score: number; weight: number }
+export const ScoreBar: React.FC<ScoreBarProps> = ({ label, score, weight }) => (
     <div>
         <div className="mb-1 flex items-center justify-between gap-3">
             <div className="min-w-0">
@@ -362,11 +433,32 @@ export const AiBanner: React.FC<{ context?: 'recruiter' | 'seeker' | 'quiz' }> =
             'Contenuto generato dall\'AI a supporto delle decisioni. Non una determinazione automatizzata — le decisioni finali sono sempre prese da persone.'
           );
 
+    const infoIcon = (
+        <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M12 2a10 10 0 100 20A10 10 0 0012 2z" />
+        </svg>
+    );
+
+    const isSeeker = context === 'seeker';
+    const tooltip = text('How does the score work?', 'Come funziona il punteggio?');
+
     return (
         <div className="flex items-start gap-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 px-3 py-2.5 mb-4">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M12 2a10 10 0 100 20A10 10 0 0012 2z" />
-            </svg>
+            {isSeeker ? (
+                <Link
+                    to="/seeker/how-matching-works"
+                    title={tooltip}
+                    aria-label={tooltip}
+                    className="group relative mt-0.5 flex-shrink-0 inline-flex h-5 w-5 -m-0.5 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-orange-100 hover:text-orange-600 dark:hover:bg-orange-950/40 dark:hover:text-orange-300"
+                >
+                    {infoIcon}
+                    <span className="pointer-events-none absolute left-1/2 top-full z-10 mt-1 -translate-x-1/2 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[10px] font-semibold text-white opacity-0 shadow transition-opacity group-hover:opacity-100 dark:bg-slate-700">
+                        {tooltip}
+                    </span>
+                </Link>
+            ) : (
+                <span className="mt-0.5 flex-shrink-0 text-slate-400">{infoIcon}</span>
+            )}
             <span className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">{msg}</span>
         </div>
     );

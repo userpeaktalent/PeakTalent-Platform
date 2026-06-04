@@ -244,7 +244,7 @@ const RecruiterProfileSetup: React.FC<RecruiterProfileSetupProps> = ({
                                 {text('Cancel', 'Annulla')}
                             </button>
                         )}
-                        <button type="submit" disabled={isLoading} className={`w-full sm:w-auto text-white font-bold rounded-xl shadow-lg hover:shadow-xl hover:-translate-y-0.5 transform transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 ${embedded ? 'bg-slate-900 px-7 py-3 text-base hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white' : 'bg-gradient-to-r from-orange-500 to-amber-500 py-3 px-10 text-lg'}`}>
+                        <button type="submit" disabled={isLoading} className={`w-full sm:w-auto text-white font-bold rounded-xl shadow-lg hover:shadow-xl transform transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 ${embedded ? 'bg-slate-900 px-7 py-3 text-base hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white' : 'bg-gradient-to-r from-orange-500 to-amber-500 py-3 px-10 text-lg'}`}>
                             {isLoading ? <Spinner /> : (
                                 <>
                                     {saveLabel || (isEditing ? text('Save Profile', 'Salva profilo') : text('Complete Setup', 'Completa setup'))}

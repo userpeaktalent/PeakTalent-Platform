@@ -463,9 +463,14 @@ export const downloadCandidateRefinementChat = async (
     candidateLabel?: string
 ) => {
     const filenameBase = buildChatFilenameBase(chat, candidateLabel);
+    const publicTranscript = getPublicRefinementTranscript(chat.transcript);
+    const publicChat = {
+        ...chat,
+        transcript: publicTranscript,
+    };
 
     if (format === 'json') {
-        const blob = new Blob([JSON.stringify(chat, null, 2)], { type: 'application/json;charset=utf-8' });
+        const blob = new Blob([JSON.stringify(publicChat, null, 2)], { type: 'application/json;charset=utf-8' });
         triggerBlobDownload(blob, `${filenameBase}.json`);
         return;
     }
@@ -480,7 +485,7 @@ export const downloadCandidateRefinementChat = async (
         'text',
     ];
 
-    const rows = chat.transcript.map((message, index) => [
+    const rows = publicTranscript.map((message, index) => [
         escapeCsv(chat.candidate_profile_id),
         escapeCsv(chat.candidate_record_id || ''),
         escapeCsv(chat.language),
@@ -494,6 +499,21 @@ export const downloadCandidateRefinementChat = async (
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
     triggerBlobDownload(blob, `${filenameBase}.csv`);
 };
+
+const INTERNAL_REFINEMENT_MARKERS = [
+    '---INTERNAL---',
+    '---END_INTERNAL---',
+    'VERIFIED_SKILLS:',
+    'INTERNAL SCORING',
+];
+
+export const isInternalRefinementMessage = (message: ChatMessage): boolean => {
+    const content = message.text || '';
+    return INTERNAL_REFINEMENT_MARKERS.some((marker) => content.includes(marker));
+};
+
+export const getPublicRefinementTranscript = (transcript: ChatMessage[] = []): ChatMessage[] =>
+    transcript.filter((message) => !isInternalRefinementMessage(message));
 
 export const saveCandidateCv = async (
     candidate: CandidateProfile,

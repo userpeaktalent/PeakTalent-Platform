@@ -5,6 +5,7 @@
 
 type PdfJsModule = typeof import('pdfjs-dist/legacy/build/pdf.mjs');
 type PdfDocumentProxy = Awaited<ReturnType<PdfJsModule['getDocument']>['promise']>;
+type PdfPageProxy = Awaited<ReturnType<PdfDocumentProxy['getPage']>>;
 
 let pdfjsWorkerLoaderPromise: Promise<PdfJsModule> | null = null;
 let pdfjsInlineLoaderPromise: Promise<PdfJsModule> | null = null;
@@ -358,6 +359,90 @@ const extractTextFromPdf = async (
   return normalizedPageText || structuralText;
 };
 
+const openPdfDocument = async (
+  pdfjsLib: PdfJsModule,
+  buffer: ArrayBuffer,
+  disableWorker: boolean
+) => pdfjsLib.getDocument({
+  data: new Uint8Array(buffer),
+  disableWorker,
+  useSystemFonts: true,
+  stopAtErrors: false,
+  isEvalSupported: false,
+} as any).promise;
+
+const createCanvasForViewport = (width: number, height: number) => {
+  if (typeof document !== 'undefined') {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.ceil(width));
+    canvas.height = Math.max(1, Math.ceil(height));
+    return canvas;
+  }
+
+  if (typeof OffscreenCanvas !== 'undefined') {
+    return new OffscreenCanvas(Math.max(1, Math.ceil(width)), Math.max(1, Math.ceil(height)));
+  }
+
+  throw new Error('Canvas rendering is not available in this environment.');
+};
+
+const canvasToJpegBlob = async (canvas: HTMLCanvasElement | OffscreenCanvas) => {
+  if ('convertToBlob' in canvas && typeof canvas.convertToBlob === 'function') {
+    return canvas.convertToBlob({ type: 'image/jpeg', quality: 0.72 });
+  }
+
+  if (typeof HTMLCanvasElement !== 'undefined' && canvas instanceof HTMLCanvasElement) {
+    return new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) {
+          resolve(blob);
+          return;
+        }
+        reject(new Error('Failed to export rendered PDF page as an image.'));
+      }, 'image/jpeg', 0.72);
+    });
+  }
+
+  throw new Error('Could not convert the rendered PDF page to an image blob.');
+};
+
+const renderPdfPageToImageBlob = async (page: PdfPageProxy) => {
+  const initialViewport = page.getViewport({ scale: 1 });
+  const targetWidth = 1280;
+  const scale = Math.min(2, Math.max(1.2, targetWidth / Math.max(initialViewport.width, 1)));
+  const viewport = page.getViewport({ scale });
+  const canvas = createCanvasForViewport(viewport.width, viewport.height);
+  const context = canvas.getContext('2d', { alpha: false } as any);
+
+  if (!context) {
+    throw new Error('Could not create a 2D canvas context for PDF rendering.');
+  }
+
+  await page.render({
+    canvasContext: context as any,
+    viewport,
+    canvas: canvas as any,
+  }).promise;
+
+  return canvasToJpegBlob(canvas);
+};
+
+const renderPdfPagesFromDocument = async (pdf: PdfDocumentProxy, maxPages: number) => {
+  const pageBlobs: Blob[] = [];
+  const totalPages = Math.min(Math.max(maxPages, 1), pdf.numPages);
+
+  for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber);
+    const blob = await renderPdfPageToImageBlob(page);
+    pageBlobs.push(blob);
+    if (typeof page.cleanup === 'function') {
+      page.cleanup();
+    }
+  }
+
+  return pageBlobs;
+};
+
 const mapPdfReadError = (error: unknown) => {
   const errorName = (error as { name?: string } | null)?.name;
   const errorMessage = (error as { message?: string } | null)?.message || '';
@@ -402,6 +487,27 @@ const parsePdfContent = async (file: File): Promise<string> => {
     throw new Error('No selectable text was extracted from the PDF.');
   } catch (fallbackError) {
     console.error('Error parsing PDF file:', fallbackError);
+    throw mapPdfReadError(fallbackError);
+  }
+};
+
+export const renderPdfPagesAsImages = async (file: File, maxPages = 3): Promise<Blob[]> => {
+  const buffer = await file.arrayBuffer();
+
+  try {
+    const pdfjsLib = await loadPdfJsWithWorker();
+    const pdf = await openPdfDocument(pdfjsLib, buffer, false);
+    return await renderPdfPagesFromDocument(pdf, maxPages);
+  } catch (workerError) {
+    console.warn('Primary PDF rendering path failed, retrying without worker:', workerError);
+  }
+
+  try {
+    const pdfjsLib = await loadPdfJsInline();
+    const pdf = await openPdfDocument(pdfjsLib, buffer, true);
+    return await renderPdfPagesFromDocument(pdf, maxPages);
+  } catch (fallbackError) {
+    console.error('Error rendering PDF pages as images:', fallbackError);
     throw mapPdfReadError(fallbackError);
   }
 };

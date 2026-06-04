@@ -48,6 +48,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ systemInstruction, chatType, on
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const isSendingRef = useRef(false);
 
   // Update messages when initialMessages changes (for resuming chats)
   useEffect(() => {
@@ -55,15 +56,6 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ systemInstruction, chatType, on
       setMessages(initialMessages);
     }
   }, [initialMessages]);
-
-  const getProgress = () => {
-    const modelMessages = messages.filter(msg => msg.role === 'model');
-    const questionsAsked = Math.max(0, modelMessages.length - 1); // Subtract initial message
-    const estimatedTotal = 6; // Based on system instruction
-    return { current: questionsAsked, total: estimatedTotal };
-  };
-
-  const progress = getProgress();
 
   const scrollToBottom = () => {
     if (disableAutoScroll) return;
@@ -81,9 +73,10 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ systemInstruction, chatType, on
   }, [messages, onMessagesUpdate]);
 
   const handleSend = async () => {
-    if (!input.trim() || isLoading) return;
+    if (!input.trim() || isLoading || isSendingRef.current) return;
 
     const userMessage: ChatMessage = { role: 'user', text: input };
+    isSendingRef.current = true;
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     // Reset textarea height
@@ -94,36 +87,22 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ systemInstruction, chatType, on
     setMessages(prev => [...prev, modelResponse]);
 
     try {
-      let hasSucceeded = false;
-      let lastError: unknown = null;
-
-      for (let attempt = 0; attempt < 2 && !hasSucceeded; attempt += 1) {
-        try {
-          await streamChatResponse(
-            [...messages, userMessage],
-            input,
-            chatType,
-            systemInstruction,
-            (chunk) => {
-              setMessages(prev => {
-                const lastMessage = prev[prev.length - 1];
-                if (lastMessage && lastMessage.role === 'model') {
-                  const updatedLastMessage = { ...lastMessage, text: lastMessage.text + chunk };
-                  return [...prev.slice(0, -1), updatedLastMessage];
-                }
-                return prev;
-              });
+      await streamChatResponse(
+        [...messages, userMessage],
+        input,
+        chatType,
+        systemInstruction,
+        (chunk) => {
+          setMessages(prev => {
+            const lastMessage = prev[prev.length - 1];
+            if (lastMessage && lastMessage.role === 'model') {
+              const updatedLastMessage = { ...lastMessage, text: lastMessage.text + chunk };
+              return [...prev.slice(0, -1), updatedLastMessage];
             }
-          );
-          hasSucceeded = true;
-        } catch (error) {
-          lastError = error;
+            return prev;
+          });
         }
-      }
-
-      if (!hasSucceeded) {
-        throw lastError || new Error('Chat response failed');
-      }
+      );
     } catch (error) {
       console.error("Error streaming chat response:", error);
       setMessages(prev => {
@@ -139,6 +118,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ systemInstruction, chatType, on
       });
     } finally {
       setIsLoading(false);
+      isSendingRef.current = false;
     }
   };
 
@@ -244,12 +224,12 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ systemInstruction, chatType, on
 
   const getMicButtonStyle = () => {
     if (voiceState === 'recording') {
-      return 'p-3 bg-red-500 text-white rounded-full shadow-md hover:shadow-lg hover:scale-105 transform transition-all duration-200 animate-pulse';
+      return 'p-3 bg-red-500 text-white rounded-full shadow-md hover:shadow-lg transform transition-all duration-200 animate-pulse';
     }
     if (voiceState === 'transcribing') {
       return 'p-3 bg-amber-400 text-white rounded-full shadow-md cursor-wait';
     }
-    return 'p-3 bg-slate-200 dark:bg-slate-600 text-slate-600 dark:text-slate-200 rounded-full shadow-sm hover:shadow-md hover:scale-105 hover:bg-slate-300 dark:hover:bg-slate-500 transform transition-all duration-200';
+    return 'p-3 bg-slate-200 dark:bg-slate-600 text-slate-600 dark:text-slate-200 rounded-full shadow-sm hover:shadow-md hover:bg-slate-300 dark:hover:bg-slate-500 transform transition-all duration-200';
   };
 
   const getMicTitle = () => {
@@ -263,12 +243,6 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ systemInstruction, chatType, on
       <div className="flex justify-between items-center p-4 border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 z-10">
         <div className="flex items-center gap-4">
           <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100">{title}</h2>
-          {chatType === 'seeker' && progress.current > 0 && (
-            <div className="text-sm text-slate-500 dark:text-slate-400">
-              {progress.current >= progress.total ? 'Wrapping up...' : 
-               `${progress.total - progress.current} questions remaining`}
-            </div>
-          )}
         </div>
         {onClose && (
           <button onClick={onClose} className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 text-2xl leading-none">&times;</button>
@@ -356,7 +330,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ systemInstruction, chatType, on
                 if (textareaRef.current) textareaRef.current.style.height = 'auto';
               }}
               disabled={isLoading || !input.trim()}
-              className="p-3 bg-gradient-to-r from-orange-500 to-amber-500 text-white rounded-full shadow-md hover:shadow-lg hover:scale-105 transform transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="p-3 bg-gradient-to-r from-orange-500 to-amber-500 text-white rounded-full shadow-md hover:shadow-lg transform transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <SendIcon />
             </button>

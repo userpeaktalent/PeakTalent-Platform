@@ -1,5 +1,15 @@
 
-import { SchemaType as Type } from '@google/generative-ai';
+// Mirror of the Gemini SchemaType enum. Values must match exactly because
+// these schemas are serialized to JSON and sent to the Gemini API verbatim.
+const Type = {
+  STRING: 'STRING',
+  NUMBER: 'NUMBER',
+  INTEGER: 'INTEGER',
+  BOOLEAN: 'BOOLEAN',
+  OBJECT: 'OBJECT',
+  ARRAY: 'ARRAY',
+} as const;
+
 // Import missing types used in the file
 import { CandidateProfile, RecruiterProfile } from './types';
 import { EDUCATION_LEVELS } from './utils/education';
@@ -196,11 +206,6 @@ export const CANDIDATE_PROFILE_SCHEMA_CV = {
       properties: {
         first_name: { type: Type.STRING },
         last_name: { type: Type.STRING },
-        pronoun: {
-          type: Type.STRING,
-          description: 'Optional pronoun.',
-          enum: ['he/him', 'she/her', 'they/them'],
-        },
       },
       required: ['first_name', 'last_name'],
     },
@@ -471,6 +476,14 @@ export const CANDIDATE_PROFILE_SCHEMA_CV = {
       type: Type.STRING,
       description: "A concise summary of the candidate's experience and skills.",
     },
+    summary_text_it: {
+      type: Type.STRING,
+      description: "Italian version of summary_text with the same facts and level of detail.",
+    },
+    summary_text_en: {
+      type: Type.STRING,
+      description: "English version of summary_text with the same facts and level of detail.",
+    },
 
     experiences: {
       type: Type.ARRAY,
@@ -497,6 +510,8 @@ export const CANDIDATE_PROFILE_SCHEMA_CV = {
           to: { type: Type.STRING, description: 'End date in YYYY-MM format or "present".' },
           is_current_position: { type: Type.BOOLEAN },
           description: { type: Type.STRING, description: 'Key achievements or responsibilities.' },
+          description_it: { type: Type.STRING, description: 'Italian version of description.' },
+          description_en: { type: Type.STRING, description: 'English version of description.' },
         },
         required: ['role', 'company', 'from', 'to', 'is_current_position'],
       },
@@ -525,6 +540,8 @@ export const CANDIDATE_PROFILE_SCHEMA_CV = {
           to: { type: Type.STRING, description: 'End date in YYYY-MM format or "present".' },
           currently_pursuing: { type: Type.BOOLEAN },
           description: { type: Type.STRING },
+          description_it: { type: Type.STRING, description: 'Italian version of description.' },
+          description_en: { type: Type.STRING, description: 'English version of description.' },
         },
         required: ['institution', 'degree_level', 'major', 'from', 'to', 'currently_pursuing'],
       },
@@ -543,11 +560,6 @@ export const CANDIDATE_PROFILE_SCHEMA_FINAL = {
       properties: {
         first_name: { type: Type.STRING },
         last_name: { type: Type.STRING },
-        pronoun: {
-          type: Type.STRING,
-          description: 'Optional pronoun.',
-          enum: ['he/him', 'she/her', 'they/them'],
-        },
       },
       required: ['first_name', 'last_name'],
     },
@@ -792,6 +804,14 @@ export const CANDIDATE_PROFILE_SCHEMA_FINAL = {
       type: Type.STRING,
       description: "A concise summary of the candidate's experience and skills.",
     },
+    summary_text_it: {
+      type: Type.STRING,
+      description: "Italian version of summary_text with the same facts and level of detail.",
+    },
+    summary_text_en: {
+      type: Type.STRING,
+      description: "English version of summary_text with the same facts and level of detail.",
+    },
     experiences: {
       type: Type.ARRAY,
       items: {
@@ -817,6 +837,8 @@ export const CANDIDATE_PROFILE_SCHEMA_FINAL = {
           to: { type: Type.STRING, description: 'End date in YYYY-MM format or "present".' },
           is_current_position: { type: Type.BOOLEAN },
           description: { type: Type.STRING, description: 'Key achievements or responsibilities.' },
+          description_it: { type: Type.STRING, description: 'Italian version of description.' },
+          description_en: { type: Type.STRING, description: 'English version of description.' },
         },
         required: ['role', 'company', 'from', 'to', 'is_current_position'],
       },
@@ -844,6 +866,8 @@ export const CANDIDATE_PROFILE_SCHEMA_FINAL = {
           to: { type: Type.STRING, description: 'End date in YYYY-MM format or "present".' },
           currently_pursuing: { type: Type.BOOLEAN },
           description: { type: Type.STRING },
+          description_it: { type: Type.STRING, description: 'Italian version of description.' },
+          description_en: { type: Type.STRING, description: 'English version of description.' },
         },
         required: ['institution', 'degree_level', 'major', 'from', 'to', 'currently_pursuing'],
       },

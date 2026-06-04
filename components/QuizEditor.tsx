@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { useLocation } from 'react-router-dom';
 import { CandidateProfile, JobProfile, QuizQuestion, TechnicalTest } from '../types';
 import { generateTechnicalTestForJob, regenerateSingleQuestion } from '../services/geminiService';
 import { saveJobTechnicalTest, getApplicantsForJob, requestCandidateAssessment } from '../services/dbService';
@@ -10,11 +9,13 @@ import { toast } from 'sonner';
 
 interface QuizEditorProps {
   job: JobProfile;
+  pendingCandidate?: CandidateProfile | null;
   onBack: () => void;
   onSaved: (updatedJob: JobProfile) => void;
 }
 
 const OPTION_LABELS = ['A', 'B', 'C', 'D'];
+const QUESTION_COUNT_OPTIONS = [10, 20, 30] as const;
 
 const difficultyLabel = (d: number | undefined, lang: 'it' | 'en') => {
   const levels = lang === 'it'
@@ -73,18 +74,18 @@ const GenerationProgressCard: React.FC<{
   </div>
 );
 
-const QuizEditor: React.FC<QuizEditorProps> = ({ job, onBack, onSaved }) => {
+const QuizEditor: React.FC<QuizEditorProps> = ({ job, pendingCandidate = null, onBack, onSaved }) => {
   const { text, language } = useLanguage();
-  const location = useLocation();
-  const pendingCandidate = (location.state as { pendingCandidate?: CandidateProfile } | null)?.pendingCandidate ?? null;
   const [questions, setQuestions] = useState<QuizQuestion[]>(
     job.technical_test?.questions ?? []
   );
-  const defaultQuestionCount = job.technical_test?.questions?.length || 1;
+  const [desiredQuestionCount, setDesiredQuestionCount] = useState<number>(
+    job.technical_test?.questions?.length || 20
+  );
   const [totalMinutes, setTotalMinutes] = useState<number>(
     job.technical_test?.time_limit_seconds
       ? Math.round(job.technical_test.time_limit_seconds / 60)
-      : defaultQuestionCount
+      : job.technical_test?.questions?.length || 20
   );
   const [hasChanges, setHasChanges] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -98,7 +99,7 @@ const QuizEditor: React.FC<QuizEditorProps> = ({ job, onBack, onSaved }) => {
   const [previewLang, setPreviewLang] = useState<'it' | 'en'>('it');
   const [completedCount, setCompletedCount] = useState(0);
   const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
-  const autoGenFired = useRef(false);
+  const isAiBusy = isGenerating || regeneratingIndex !== null || isSaving;
 
   const generationMessages = useMemo(() => ([
     text('Reading the job requirements…', 'Lettura dei requisiti del ruolo…'),
@@ -163,13 +164,6 @@ const QuizEditor: React.FC<QuizEditorProps> = ({ job, onBack, onSaved }) => {
   }, [job.id]);
 
   // Auto-generate on first open when no quiz exists yet
-  useEffect(() => {
-    if (!autoGenFired.current && !(job.technical_test?.questions?.length)) {
-      autoGenFired.current = true;
-      void doGenerate();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const withCompletionGuard = useCallback((action: () => void) => {
     if (completedCount > 0) {
@@ -187,14 +181,17 @@ const QuizEditor: React.FC<QuizEditorProps> = ({ job, onBack, onSaved }) => {
       : (q.options_it ?? q.options);
 
   const doGenerate = async () => {
+    if (isAiBusy) return;
     setIsGenerating(true);
     setGenerationProgress(8);
     setGenerationElapsed(0);
     setError(null);
     try {
-      const test = await generateTechnicalTestForJob(job);
+      setTotalMinutes(desiredQuestionCount);
+      const test = await generateTechnicalTestForJob(job, desiredQuestionCount);
       setGenerationProgress(100);
       setQuestions(test.questions);
+      setTotalMinutes(Math.round(test.time_limit_seconds / 60));
       setHasChanges(true);
     } catch (e: any) {
       setError(e.message || text('Generation failed.', 'Generazione fallita.'));
@@ -204,6 +201,7 @@ const QuizEditor: React.FC<QuizEditorProps> = ({ job, onBack, onSaved }) => {
   };
 
   const doRegenerate = async (index: number) => {
+    if (isAiBusy) return;
     setRegeneratingIndex(index);
     setError(null);
     try {
@@ -223,8 +221,14 @@ const QuizEditor: React.FC<QuizEditorProps> = ({ job, onBack, onSaved }) => {
     setHasChanges(true);
   };
 
-  const handleGenerate = () => withCompletionGuard(doGenerate);
-  const handleRegenerate = (index: number) => withCompletionGuard(() => doRegenerate(index));
+  const handleGenerate = () => {
+    if (isAiBusy) return;
+    withCompletionGuard(doGenerate);
+  };
+  const handleRegenerate = (index: number) => {
+    if (isAiBusy) return;
+    withCompletionGuard(() => doRegenerate(index));
+  };
   const handleDelete = (index: number) => withCompletionGuard(() => doDelete(index));
 
   const handleAddManual = () => {
@@ -260,13 +264,14 @@ const QuizEditor: React.FC<QuizEditorProps> = ({ job, onBack, onSaved }) => {
     setIsSaving(true);
     setError(null);
     try {
+      const generatedAt = new Date().toISOString();
       const test: TechnicalTest = {
         questions,
-        generated_at: job.technical_test?.generated_at ?? new Date().toISOString(),
+        generated_at: generatedAt,
         generated_from_job_title: job.title,
         time_limit_seconds: totalMinutes * 60,
       };
-      const savedJob = { ...job, technical_test: test };
+      const savedJob = { ...job, technical_test: test, requires_quiz: true };
       await saveJobTechnicalTest(job, test);
 
       if (pendingCandidate) {
@@ -339,11 +344,24 @@ const QuizEditor: React.FC<QuizEditorProps> = ({ job, onBack, onSaved }) => {
               >EN</button>
             </div>
           )}
+          {questions.length > 0 && !isGenerating && (
+            <button
+              onClick={handleGenerate}
+              disabled={isAiBusy}
+              title={text('Regenerate all questions with AI', 'Rigenera tutte le domande con AI')}
+              className="flex items-center gap-2 py-2 px-4 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-semibold text-slate-600 dark:text-slate-300 hover:text-orange-600 hover:border-orange-300 dark:hover:border-orange-700 hover:bg-orange-50 dark:hover:bg-orange-900/10 transition-all disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              {text('Regenerate all', 'Rigenera tutte')}
+            </button>
+          )}
           {hasChanges && (
             <button
               onClick={handleSave}
               disabled={isSaving}
-              className="bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-2 px-5 rounded-xl shadow hover:shadow-md hover:-translate-y-0.5 transition-all disabled:opacity-50 text-sm"
+              className="bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-2 px-5 rounded-xl shadow hover:shadow-md transition-all disabled:opacity-50 text-sm"
             >
               {isSaving ? text('Saving...', 'Salvataggio...') : text('Save changes', 'Salva modifiche')}
             </button>
@@ -448,12 +466,36 @@ const QuizEditor: React.FC<QuizEditorProps> = ({ job, onBack, onSaved }) => {
       {/* Empty state */}
       {questions.length === 0 && !isGenerating && (
         <div className="text-center py-20 border-2 border-dashed border-slate-200 dark:border-slate-700 rounded-2xl">
-          <p className="text-slate-500 dark:text-slate-400 mb-6 text-base">
+          <p className="text-slate-500 dark:text-slate-400 mb-4 text-base">
             {text('No questionnaire yet for this job posting.', 'Nessun questionario ancora per questo job posting.')}
           </p>
+          <p className="text-sm text-slate-500 dark:text-slate-400 mb-6 max-w-xl mx-auto">
+            {text(
+              'Choose the number of questions to generate before creating the technical assessment.',
+              'Scegli il numero di domande da generare prima di creare la valutazione tecnica.'
+            )}
+          </p>
+          <div className="mb-6 grid grid-cols-3 gap-3 max-w-md mx-auto">
+            {QUESTION_COUNT_OPTIONS.map((count) => (
+              <button
+                key={count}
+                type="button"
+                onClick={() => setDesiredQuestionCount(count)}
+                disabled={isAiBusy}
+                className={`rounded-2xl border px-4 py-3 text-sm font-semibold transition-all ${desiredQuestionCount === count
+                  ? 'border-orange-500 bg-orange-500 text-white shadow-sm'
+                  : 'border-slate-200 bg-white text-slate-700 hover:border-orange-300 hover:bg-orange-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-orange-500 dark:hover:bg-slate-800'
+                } disabled:cursor-not-allowed disabled:opacity-50`}
+              >
+                {count}
+                <span className="block text-xs font-medium text-slate-500 dark:text-slate-400">{text('questions', 'domande')}</span>
+              </button>
+            ))}
+          </div>
           <button
             onClick={handleGenerate}
-            className="bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-3 px-8 rounded-xl shadow-md hover:shadow-lg hover:-translate-y-0.5 transition-all"
+            disabled={isAiBusy}
+            className="bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-3 px-8 rounded-xl shadow-md hover:shadow-lg transition-all disabled:cursor-not-allowed disabled:opacity-50"
           >
             {text('Generate questionnaire with AI', 'Genera questionario con AI')}
           </button>
@@ -491,7 +533,7 @@ const QuizEditor: React.FC<QuizEditorProps> = ({ job, onBack, onSaved }) => {
                 <div className="flex gap-2 flex-shrink-0">
                   <button
                     onClick={() => handleRegenerate(index)}
-                    disabled={regeneratingIndex !== null}
+                    disabled={isAiBusy}
                     title={text('Regenerate with AI', 'Rigenera con AI')}
                     className="p-1.5 text-slate-400 hover:text-orange-500 hover:bg-orange-50 dark:hover:bg-orange-900/20 rounded-lg transition-all disabled:opacity-40"
                   >
@@ -508,8 +550,9 @@ const QuizEditor: React.FC<QuizEditorProps> = ({ job, onBack, onSaved }) => {
                   </button>
                   <button
                     onClick={() => handleDelete(index)}
+                    disabled={isAiBusy}
                     title={text('Delete', 'Elimina')}
-                    className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-all"
+                    className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-all disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -678,17 +721,6 @@ const QuizEditor: React.FC<QuizEditorProps> = ({ job, onBack, onSaved }) => {
         </div>
       )}
 
-      {/* Regenerate entire quiz if already has questions */}
-      {questions.length > 0 && !isGenerating && (
-        <div className="mt-8 text-center">
-          <button
-            onClick={handleGenerate}
-            className="text-sm text-slate-400 hover:text-orange-500 transition-colors"
-          >
-            {text('Regenerate entire questionnaire from scratch', 'Rigenera tutto il questionario da zero')}
-          </button>
-        </div>
-      )}
     </div>
   );
 };

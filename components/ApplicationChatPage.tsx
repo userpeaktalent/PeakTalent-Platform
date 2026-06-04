@@ -22,7 +22,7 @@ const ApplicationChatPage: React.FC<ApplicationChatPageProps> = ({ job, onCancel
   const chatHistoryRef = useRef<ChatMessage[]>([]);
 
   const handleGenerateProfile = async () => {
-      if (!job || !candidate) return;
+      if (!job || !candidate || isGenerating) return;
       setIsGenerating(true);
       setRefinedProfile(null);
       try {
@@ -129,7 +129,7 @@ const ApplicationChatPage: React.FC<ApplicationChatPageProps> = ({ job, onCancel
                                     <button 
                                         onClick={handleGenerateProfile} 
                                         disabled={isGenerating} 
-                                        className="bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-3 px-8 rounded-xl shadow-lg hover:shadow-xl hover:-translate-y-1 transform transition-all duration-300 disabled:opacity-50"
+                                        className="bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-3 px-8 rounded-xl shadow-lg hover:shadow-xl transform transition-all duration-300 disabled:opacity-50"
                                     >
                                         {isGenerating ? <Spinner /> : text('Generate Refined Application JSON', 'Genera JSON candidatura ottimizzato')}
                                     </button>

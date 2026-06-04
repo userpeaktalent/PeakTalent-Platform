@@ -37,9 +37,9 @@ const RoleSelection: React.FC<RoleSelectionProps> = ({ onSelectRole, onLogin }) 
         {/* Job Seeker Card */}
         <button
           onClick={() => onSelectRole('seeker')}
-          className="group relative flex flex-col items-center justify-center text-center p-10 bg-white dark:bg-slate-800 rounded-3xl shadow-xl hover:shadow-2xl hover:shadow-orange-500/10 transition-all duration-300 border border-slate-100 dark:border-slate-700 overflow-hidden transform hover:-translate-y-2"
+          className="group relative flex flex-col items-center justify-center text-center p-10 bg-white dark:bg-slate-800 rounded-3xl shadow-xl hover:shadow-2xl hover:shadow-orange-500/10 transition-all duration-300 border border-slate-100 dark:border-slate-700 overflow-hidden transform"
         >
-          <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-orange-500 to-amber-500 transform origin-left scale-x-0 group-hover:scale-x-100 transition-transform duration-300"></div>
+          <div className="absolute top-0 left-0 h-2 w-full bg-gradient-to-r from-orange-500 to-amber-500 opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
 
           <div className="p-4 bg-orange-50 dark:bg-slate-700 rounded-full mb-6 group-hover:bg-orange-100 dark:group-hover:bg-slate-600 transition-colors">
             <UserIcon />
@@ -54,9 +54,9 @@ const RoleSelection: React.FC<RoleSelectionProps> = ({ onSelectRole, onLogin }) 
         {/* Recruiter Card */}
         <button
           onClick={() => onSelectRole('recruiter')}
-          className="group relative flex flex-col items-center justify-center text-center p-10 bg-white dark:bg-slate-800 rounded-3xl shadow-xl hover:shadow-2xl hover:shadow-amber-500/10 transition-all duration-300 border border-slate-100 dark:border-slate-700 overflow-hidden transform hover:-translate-y-2"
+          className="group relative flex flex-col items-center justify-center text-center p-10 bg-white dark:bg-slate-800 rounded-3xl shadow-xl hover:shadow-2xl hover:shadow-amber-500/10 transition-all duration-300 border border-slate-100 dark:border-slate-700 overflow-hidden transform"
         >
-          <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-amber-500 to-orange-500 transform origin-left scale-x-0 group-hover:scale-x-100 transition-transform duration-300"></div>
+          <div className="absolute top-0 left-0 h-2 w-full bg-gradient-to-r from-amber-500 to-orange-500 opacity-0 transition-opacity duration-300 group-hover:opacity-100"></div>
 
           <div className="p-4 bg-amber-50 dark:bg-slate-700 rounded-full mb-6 group-hover:bg-amber-100 dark:group-hover:bg-slate-600 transition-colors">
             <BriefcaseIcon />

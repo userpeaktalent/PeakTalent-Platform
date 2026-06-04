@@ -5,6 +5,7 @@ import { getNotifications, markNotificationAsRead } from '../services/dbService'
 import { Notification } from '../types';
 import { useNavigate } from 'react-router-dom';
 import { useLanguage } from './LanguageProvider';
+import { withRetry } from '../utils/retry';
 
 interface NotificationsPageProps {
     onBack: () => void;
@@ -32,7 +33,13 @@ const NotificationsPage: React.FC<NotificationsPageProps> = ({ onBack }) => {
             if (effectiveProfileId) {
                 setIsLoading(true);
                 try {
-                    const data = await getNotifications(effectiveProfileId);
+                    const data = await withRetry(() => getNotifications(effectiveProfileId), {
+                        attempts: 3,
+                        delaysMs: [0, 900, 2200],
+                        onRetry: (error, attempt) => {
+                            console.warn(`Retrying notifications load for ${effectiveProfileId} after failed attempt ${attempt}:`, error);
+                        },
+                    });
                     setNotifications(data);
                 } catch (error) {
                     console.error("Failed to load notifications:", error);
@@ -154,10 +161,10 @@ const NotificationsPage: React.FC<NotificationsPageProps> = ({ onBack }) => {
                                 onClick={() => handleNotificationClick(notif)}
                                 className={`rounded-3xl border p-4 transition-all duration-300 flex gap-4 cursor-pointer group sm:gap-5 sm:p-6 ${notif.is_read
                                     ? 'bg-white/50 dark:bg-slate-900/30 border-slate-100 dark:border-slate-800 opacity-80 grayscale-[0.5]'
-                                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 shadow-md hover:shadow-xl hover:-translate-y-1'
+                                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 shadow-md hover:shadow-xl'
                                     }`}
                             >
-                                <div className={`flex-shrink-0 h-12 w-12 rounded-2xl flex items-center justify-center transition-transform group-hover:scale-110 ${notif.type === 'application_received' ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400' :
+                                <div className={`flex-shrink-0 h-12 w-12 rounded-2xl flex items-center justify-center transition-transform ${notif.type === 'application_received' ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400' :
                                     notif.type === 'invitation_received' ? 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400' :
                                         'bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400'
                                     }`}>

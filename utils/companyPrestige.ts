@@ -9,7 +9,7 @@
  * Names are lowercase-normalized for fuzzy lookup.
  */
 
-const TIER_1_COMPANIES: string[] = [
+export const TIER_1_COMPANIES: string[] = [
     // Tech Giants
     'google', 'alphabet',
     'apple',
@@ -73,7 +73,7 @@ const TIER_1_COMPANIES: string[] = [
     'gse', 'gestore dei servizi energetici',
 ];
 
-const TIER_2_COMPANIES: string[] = [
+export const TIER_2_COMPANIES: string[] = [
     // Tech
     'uber', 'lyft',
     'airbnb',
@@ -289,7 +289,7 @@ const TIER_2_COMPANIES: string[] = [
     'var group',
 ];
 
-const TIER_3_COMPANIES: string[] = [
+export const TIER_3_COMPANIES: string[] = [
     // Tech & SaaS
     'hubspot',
     'zendesk',
@@ -450,7 +450,7 @@ const TIER_3_COMPANIES: string[] = [
 ];
 
 /** Normalize a company name for lookup. */
-const normalizeCompanyName = (name: string): string =>
+export const normalizeCompanyName = (name: string): string =>
     name.toLowerCase().trim()
         .replace(/[''`]/g, "'")
         .replace(/[–—]/g, '-')
@@ -458,31 +458,55 @@ const normalizeCompanyName = (name: string): string =>
         .replace(/,?\s*(inc\.?|ltd\.?|llc\.?|corp\.?|plc\.?|s\.?p\.?a\.?|gmbh|ag|s\.?r\.?l\.?)$/i, '')
         .trim();
 
-const companyTier1Set = new Set(TIER_1_COMPANIES.map(normalizeCompanyName));
-const companyTier2Set = new Set(TIER_2_COMPANIES.map(normalizeCompanyName));
-const companyTier3Set = new Set(TIER_3_COMPANIES.map(normalizeCompanyName));
+const defaultCompanyTier1Set = new Set(TIER_1_COMPANIES.map(normalizeCompanyName));
+const defaultCompanyTier2Set = new Set(TIER_2_COMPANIES.map(normalizeCompanyName));
+const defaultCompanyTier3Set = new Set(TIER_3_COMPANIES.map(normalizeCompanyName));
+
+export interface CompanyTierLists {
+    tier1?: string[];
+    tier2?: string[];
+    tier3?: string[];
+}
+
+const buildCompanyTierSets = (overrides?: CompanyTierLists | null) => {
+    if (!overrides) {
+        return { t1: defaultCompanyTier1Set, t2: defaultCompanyTier2Set, t3: defaultCompanyTier3Set };
+    }
+    const t1 = Array.isArray(overrides.tier1)
+        ? new Set(overrides.tier1.map(normalizeCompanyName).filter(Boolean))
+        : defaultCompanyTier1Set;
+    const t2 = Array.isArray(overrides.tier2)
+        ? new Set(overrides.tier2.map(normalizeCompanyName).filter(Boolean))
+        : defaultCompanyTier2Set;
+    const t3 = Array.isArray(overrides.tier3)
+        ? new Set(overrides.tier3.map(normalizeCompanyName).filter(Boolean))
+        : defaultCompanyTier3Set;
+    return { t1, t2, t3 };
+};
 
 /**
  * Returns the prestige tier for a company.
- * 1 = global leader, 2 = major well-known, 3 = strong regional, 4 = unknown
+ * 1 = global leader, 2 = major well-known, 3 = strong regional, 4 = unknown.
+ * Optional `overrides` replace the default tier lists (per-job customization).
  */
-export const getCompanyTier = (companyName: string): number => {
+export const getCompanyTier = (companyName: string, overrides?: CompanyTierLists | null): number => {
     if (!companyName) return 4;
     const name = normalizeCompanyName(companyName);
+    const { t1, t2, t3 } = buildCompanyTierSets(overrides);
 
     // Exact match
-    if (companyTier1Set.has(name)) return 1;
-    if (companyTier2Set.has(name)) return 2;
-    if (companyTier3Set.has(name)) return 3;
+    if (t1.has(name)) return 1;
+    if (t2.has(name)) return 2;
+    if (t3.has(name)) return 3;
 
     // Substring match (only for names ≥ 4 chars to avoid false positives)
-    for (const known of companyTier1Set) {
+    for (const known of t1) {
         if (known.length >= 4 && (name.includes(known) || known.includes(name))) return 1;
     }
-    for (const known of companyTier2Set) {
+    for (const known of t2) {
         if (known.length >= 4 && (name.includes(known) || known.includes(name))) return 2;
     }
-    for (const known of companyTier3Set) {
+    for (const known of t3) {
         if (known.length >= 4 && (name.includes(known) || known.includes(name))) return 3;
     }
 

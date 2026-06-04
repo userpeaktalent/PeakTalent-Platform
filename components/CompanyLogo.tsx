@@ -41,7 +41,7 @@ const CompanyLogo: React.FC<CompanyLogoProps> = ({
                 <img
                     src={logoUrl}
                     alt={companyName ? `${companyName} logo` : 'Company logo'}
-                    className={fullBleed ? 'h-full w-full object-cover' : 'h-full w-full object-contain p-2'}
+                    className={fullBleed ? 'h-full w-full object-fill' : 'h-full w-full object-contain p-2'}
                     loading="lazy"
                 />
             </div>

@@ -38,6 +38,23 @@ const getEnv = (name: string) => {
   return value;
 };
 
+const optional = (name: string) => Deno.env.get(name)?.trim() || '';
+
+const truncate = (value: string, max = 500) => (value.length > max ? `${value.slice(0, max)}...` : value);
+const EMAIL_SETTING_KEY = 'email';
+
+const isMissingSettingsTableError = (error: unknown) => {
+  const code = String((error as any)?.code || '').trim();
+  const message = String((error as any)?.message || '').toLowerCase();
+
+  return (
+    code === 'PGRST205' ||
+    code === '42P01' ||
+    (message.includes('platform_feature_flags') && message.includes('not found')) ||
+    (message.includes('relation') && message.includes('platform_feature_flags'))
+  );
+};
+
 const toDisplayName = (value?: string | null, fallback = 'there') => {
   const trimmed = value?.trim();
   return trimmed || fallback;
@@ -238,6 +255,70 @@ const sendEmailViaGraph = async (payload: InvitePayload, senderName: string) => 
   }
 };
 
+const getEmailSendingEnabled = async (adminClient: ReturnType<typeof createClient>) => {
+  const { data, error } = await adminClient
+    .from('platform_feature_flags')
+    .select('enabled')
+    .eq('key', EMAIL_SETTING_KEY)
+    .maybeSingle();
+
+  if (error) {
+    if (isMissingSettingsTableError(error)) {
+      return false;
+    }
+    throw new Error(`Could not load email setting: ${error.message}`);
+  }
+
+  return Boolean(data?.enabled);
+};
+
+const insertActivityLog = async (
+  adminClient: ReturnType<typeof createClient>,
+  actor: { userId: string; email: string | null; role: string | null; fullName: string | null },
+  payload: InvitePayload,
+  status: 'success' | 'error',
+  errorMessage?: string,
+  summaryOverride?: string,
+  metadataOverride?: Record<string, unknown>
+) => {
+  try {
+    await adminClient.from('activity_logs').insert({
+      actor_user_id: actor.userId,
+      actor_email: actor.email,
+      actor_role: actor.role,
+      effective_profile_id: actor.userId,
+      effective_email: actor.email,
+      effective_role: actor.role,
+      effective_name: actor.fullName,
+      is_impersonating: false,
+      event_type: 'edge_function_call',
+      status,
+      source: 'send-recruiter-interest-email',
+      function_name: 'send-recruiter-interest-email',
+      purpose: payload.invitationType === 'assessment' ? 'questionnaire_invite' : 'ai_refinement_invite',
+      entity_type: 'job',
+      entity_id: payload.jobId,
+      entity_label: payload.jobTitle,
+      summary: summaryOverride || (
+        status === 'success'
+          ? `Sent ${payload.invitationType === 'assessment' ? 'questionnaire' : 'AI refinement'} invite for "${payload.jobTitle}".`
+          : `Failed to send ${payload.invitationType === 'assessment' ? 'questionnaire' : 'AI refinement'} invite for "${payload.jobTitle}".`
+      ),
+      metadata: {
+        candidate_email: payload.candidateEmail,
+        candidate_name: payload.candidateName || null,
+        recruiter_email: payload.recruiterEmail || null,
+        question_count: payload.questionCount || null,
+        requires_ai_refinement: payload.requiresAiRefinement ?? null,
+        error_message: errorMessage ? truncate(errorMessage) : null,
+        ...(metadataOverride || {}),
+      },
+    });
+  } catch (error) {
+    console.warn('[send-recruiter-interest-email] Activity log insert failed:', error);
+  }
+};
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -246,6 +327,8 @@ Deno.serve(async (req) => {
   if (req.method !== 'POST') {
     return json({ error: 'Method not allowed' }, 405);
   }
+
+  let payloadForLogging: InvitePayload | null = null;
 
   try {
     const authorization = req.headers.get('Authorization');
@@ -300,15 +383,74 @@ Deno.serve(async (req) => {
     }
 
     const payload = (await req.json()) as InvitePayload;
+    payloadForLogging = payload;
     if (!payload?.candidateEmail || !payload?.jobId || !payload?.jobTitle || !payload?.invitationType) {
       return json({ error: 'Missing required email payload fields.' }, 400);
     }
 
+    const actor = {
+      userId: user.id,
+      email: profile.email?.trim() || user.email?.trim() || null,
+      role: profile.role || null,
+      fullName: profile.full_name?.trim() || null,
+    };
+
+    const emailSendingEnabled = await getEmailSendingEnabled(adminClient);
+    if (!emailSendingEnabled) {
+      await insertActivityLog(
+        adminClient,
+        actor,
+        payload,
+        'success',
+        undefined,
+        `Skipped ${payload.invitationType === 'assessment' ? 'questionnaire' : 'AI refinement'} invite for "${payload.jobTitle}" because email sending is paused by admin.`,
+        { email_paused: true }
+      );
+      return json({ success: true, paused: true });
+    }
+
     await sendEmailViaGraph(payload, profile.full_name || profile.email || 'PeakTalent');
+    await insertActivityLog(adminClient, actor, payload, 'success');
 
     return json({ success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown edge function error.';
+    try {
+      const authorization = req.headers.get('Authorization');
+      const supabaseUrl = optional('SUPABASE_URL');
+      const anonKey = optional('SUPABASE_ANON_KEY');
+      const serviceRoleKey = optional('SUPABASE_SERVICE_ROLE_KEY');
+      if (authorization?.startsWith('Bearer ') && supabaseUrl && anonKey && serviceRoleKey) {
+        const authClient = createClient(supabaseUrl, anonKey, {
+          global: { headers: { Authorization: authorization } },
+          auth: { persistSession: false, autoRefreshToken: false },
+        });
+        const adminClient = createClient(supabaseUrl, serviceRoleKey, {
+          auth: { persistSession: false, autoRefreshToken: false },
+        });
+        const {
+          data: { user },
+        } = await authClient.auth.getUser();
+        if (user?.id) {
+          const { data: profile } = await adminClient
+            .from('profiles')
+            .select('role, full_name, email')
+            .eq('id', user.id)
+            .maybeSingle();
+          const actor = {
+            userId: user.id,
+            email: profile?.email?.trim() || user.email?.trim() || null,
+            role: profile?.role || null,
+            fullName: profile?.full_name?.trim() || null,
+          };
+          if (payloadForLogging?.jobId && payloadForLogging?.jobTitle && payloadForLogging?.candidateEmail && payloadForLogging?.invitationType) {
+            await insertActivityLog(adminClient, actor, payloadForLogging, 'error', message);
+          }
+        }
+      }
+    } catch (logError) {
+      console.warn('[send-recruiter-interest-email] Failed to log error event:', logError);
+    }
     return json({ error: message }, 500);
   }
 });

@@ -94,7 +94,7 @@ const BugReportButton: React.FC = () => {
                 onClick={() => setOpen(true)}
                 aria-label={text('Report a bug', 'Segnala un bug')}
                 title={text('Report a bug', 'Segnala un bug')}
-                className="fixed bottom-5 left-5 z-[90] h-11 w-11 rounded-full bg-orange-500 text-white shadow-lg shadow-orange-500/30 ring-2 ring-white dark:ring-slate-900 hover:bg-orange-600 hover:scale-105 active:scale-95 transition-all flex items-center justify-center"
+                className="fixed bottom-5 left-5 z-[90] h-11 w-11 rounded-full bg-orange-500 text-white shadow-lg shadow-orange-500/30 ring-2 ring-white dark:ring-slate-900 hover:bg-orange-600 transition-all flex items-center justify-center"
             >
                 <BugIcon />
             </button>

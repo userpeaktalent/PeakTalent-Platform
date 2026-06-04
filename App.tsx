@@ -1,12 +1,16 @@
 import React, { Suspense, lazy, useEffect, useState } from 'react';
 import { Toaster, toast } from 'sonner';
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation, useParams } from 'react-router-dom';
+import type { JobFlowMode } from './components/RecruiterFlow';
 
 // Eager imports: on the critical path for first paint (marketing + auth + chrome).
 import Auth from './components/Auth';
 import RecruiterAuth from './components/RecruiterAuth';
 import RoleSelection from './components/RoleSelection';
 import MarketingHomePage from './components/MarketingHomePage';
+import TermsAndConditionsPage from './components/TermsAndConditionsPage';
+import PrivacyPolicyPage from './components/PrivacyPolicyPage';
+import CookiePolicyPage from './components/CookiePolicyPage';
 import Header from './components/Header';
 import Footer from './components/Footer';
 import BugReportButton from './components/BugReportButton';
@@ -17,6 +21,7 @@ import ErrorBoundary from './components/ErrorBoundary';
 const RecruiterProfileSetup = lazy(() => import('./components/RecruiterProfileSetup'));
 const JobSeekerFlow = lazy(() => import('./components/JobSeekerFlow'));
 const RecruiterHomePage = lazy(() => import('./components/RecruiterHomePage'));
+const RecruiterCandidatesPage = lazy(() => import('./components/RecruiterCandidatesPage'));
 const RecruiterFlow = lazy(() => import('./components/RecruiterFlow'));
 const QuizEditor = lazy(() => import('./components/QuizEditor'));
 const JobSeekerHomePage = lazy(() => import('./components/JobSeekerHomePage'));
@@ -24,25 +29,52 @@ const JobDetailsPage = lazy(() => import('./components/JobDetailsPage'));
 const JobBoardPage = lazy(() => import('./components/JobBoardPage'));
 const SettingsPage = lazy(() => import('./components/SettingsPage'));
 const RecruiterMatchesView = lazy(() => import('./components/RecruiterMatchesView'));
+const JobAnalyticsPage = lazy(() => import('./components/JobAnalyticsPage'));
+const JobPipelinePage = lazy(() => import('./components/JobPipelinePage'));
 const JobEvaluationHub = lazy(() => import('./components/JobEvaluationHub'));
 const RecruiterSettingsPage = lazy(() => import('./components/RecruiterSettingsPage'));
 const CandidateProfileView = lazy(() => import('./components/CandidateProfileView'));
+const HowMatchingWorksPage = lazy(() => import('./components/HowMatchingWorksPage'));
 const AdminDashboard = lazy(() => import('./components/AdminDashboard'));
 const AdminSettingsPage = lazy(() => import('./components/AdminSettingsPage'));
 
 import { AuthProvider, useAuth } from './components/AuthProvider';
 import { LanguageProvider, useLanguage } from './components/LanguageProvider';
-import { getCandidate, getRecruiter, applyToJob, getCandidateAssessmentStatuses, getJobById, getNotifications, unapplyFromJob } from './services/dbService';
+import { PageSkeleton } from './components/common';
+import { getCandidate, getRecruiter, applyToJob, getApplicantsForJob, getCandidateAssessmentStatuses, getJobById, getNotifications, isEmailInvitedToJob, unapplyFromJob } from './services/dbService';
 import { clearPendingJobInterest, loadPendingJobInterest, savePendingJobInterest } from './services/accessLinks';
+import { clearPendingPasswordRecovery, hasPendingPasswordRecovery } from './services/passwordRecoveryService';
 import { invalidateSeekerMatchCache } from './utils/seekerMatchCache';
 import { CandidateProfile, RecruiterProfile, JobProfile } from './types';
+import { withRetry } from './utils/retry';
+import { isJobQuizEnabled } from './utils/questionnaire';
 
 
 // Define types for page navigation if used by children
 export type SeekerPage = 'dashboard' | 'application' | 'jobDetails' | 'settings' | 'notifications' | 'profileView' | 'jobBoard' | 'evaluation' | 'logout';
-export type RecruiterPage = 'dashboard' | 'jobFlow' | 'editProfile' | 'notifications' | 'settings' | 'profileSetup' | 'matches' | 'jobDetails' | 'quizEditor';
+export type RecruiterPage = 'dashboard' | 'jobFlow' | 'editProfile' | 'notifications' | 'settings' | 'profileSetup' | 'matches' | 'jobDetails' | 'quizEditor' | 'candidates';
 
 const PUBLIC_SITE_URL = (import.meta.env.VITE_PUBLIC_SITE_URL || 'https://www.peaktalent.it').replace(/\/$/, '');
+
+const buildPathWithQuery = (
+  pathname: string,
+  params: Record<string, string | number | boolean | null | undefined>
+) => {
+  const searchParams = new URLSearchParams();
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return;
+    searchParams.set(key, String(value));
+  });
+
+  const query = searchParams.toString();
+  return query ? `${pathname}?${query}` : pathname;
+};
+
+const parseRecruiterFlowMode = (value?: string | null): JobFlowMode => {
+  if (value === 'edit' || value === 'review' || value === 'add-applicants') return value;
+  return 'create';
+};
 
 const ensureMetaTag = (selector: string, attributes: Record<string, string>, content: string) => {
   if (typeof document === 'undefined') return;
@@ -140,8 +172,18 @@ function useJobLoader(dashboardPath: string) {
     }
     if (!id) { setIsLoadingJob(false); return; }
     setIsLoadingJob(true);
-    getJobById(id).then((fetched) => {
+    withRetry(() => getJobById(id), {
+      attempts: 3,
+      delaysMs: [0, 900, 2200],
+      onRetry: (error, attempt) => {
+        console.warn(`Retrying job loader for ${id} after failed attempt ${attempt}:`, error);
+      },
+    }).then((fetched) => {
       setJob(fetched || null);
+      setIsLoadingJob(false);
+    }).catch((error) => {
+      console.error(`Failed to load job ${id}:`, error);
+      setJob(null);
       setIsLoadingJob(false);
     });
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -169,7 +211,7 @@ const JobDetailsWrapper: React.FC<{ candidate: CandidateProfile | null }> = ({ c
     let isMounted = true;
 
     const loadAssessmentState = async () => {
-      if (!effectiveProfileId || !job?.id) {
+      if (!effectiveProfileId || !job?.id || !isJobQuizEnabled(job)) {
         if (isMounted) setHasAssessmentRequest(false);
         return;
       }
@@ -245,16 +287,58 @@ const JobDetailsWrapper: React.FC<{ candidate: CandidateProfile | null }> = ({ c
       onApply={handleApply}
       onUnapply={handleUnapply}
       onOpenEvaluation={() => navigate(`/seeker/evaluation/${job.id}`, { state: { job } })}
-      onOpenProfileRefine={() => navigate('/seeker/profile', { state: { returnTo: `/seeker/evaluation/${job.id}`, startStep: 3 } })}
+      onOpenProfileRefine={() => navigate(buildPathWithQuery('/seeker/profile', { returnTo: `/seeker/evaluation/${job.id}`, startStep: 3 }))}
     />
   );
 }
 
-const RecruiterJobDetailsWrapper: React.FC = () => {
-  const { job, isLoadingJob, loadingEl, missingEl, navigate } = useJobLoader('/recruiter/dashboard');
+const RecruiterAnalyticsWrapper: React.FC = () => {
+  const { job, isLoadingJob, loadingEl, missingEl } = useJobLoader('/recruiter/dashboard');
   if (isLoadingJob) return loadingEl;
   if (!job) return missingEl;
-  return <JobDetailsPage job={job} viewerRole="recruiter" onBack={() => navigate('/recruiter/dashboard')} onApply={async () => { }} onUnapply={async () => { }} />;
+  return <JobAnalyticsPage job={job} />;
+}
+
+const RecruiterPipelineWrapper: React.FC = () => {
+  const { job, isLoadingJob, loadingEl, missingEl } = useJobLoader('/recruiter/dashboard');
+  if (isLoadingJob) return loadingEl;
+  if (!job) return missingEl;
+  return <JobPipelinePage job={job} />;
+}
+
+const RecruiterJobDetailsWrapper: React.FC = () => {
+  const { job, isLoadingJob, loadingEl, missingEl, navigate } = useJobLoader('/recruiter/dashboard');
+  const [applicantCount, setApplicantCount] = useState<number | undefined>(undefined);
+
+  useEffect(() => {
+    if (!job?.id) {
+      setApplicantCount(undefined);
+      return;
+    }
+
+    let isMounted = true;
+    setApplicantCount(undefined);
+    getApplicantsForJob(job.id, job.applicant_emails || [])
+      .then((applicants) => {
+        if (isMounted) {
+          setApplicantCount(applicants.length);
+        }
+      })
+      .catch((error) => {
+        console.error(`Failed to load applicant count for job ${job.id}:`, error);
+        if (isMounted) {
+          setApplicantCount(job.applicant_emails?.length || 0);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [job?.id, job?.applicant_emails]);
+
+  if (isLoadingJob) return loadingEl;
+  if (!job) return missingEl;
+  return <JobDetailsPage job={job} viewerRole="recruiter" applicantCount={applicantCount} onBack={() => navigate('/recruiter/dashboard')} onApply={async () => { }} onUnapply={async () => { }} />;
 }
 
 const RecruiterMatchesWrapper: React.FC = () => {
@@ -263,6 +347,143 @@ const RecruiterMatchesWrapper: React.FC = () => {
   if (!job) return missingEl;
   return <RecruiterMatchesView job={job} onBack={() => navigate('/recruiter/dashboard')} />;
 }
+
+const RecruiterCurateWrapper: React.FC<{ recruiter: RecruiterProfile }> = ({ recruiter }) => {
+  const { text } = useLanguage();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const searchParams = new URLSearchParams(location.search);
+  const mode = parseRecruiterFlowMode(searchParams.get('mode') || location.state?.mode);
+  const stateJob = (location.state?.job as JobProfile | undefined) || null;
+  const jobId = searchParams.get('jobId') || stateJob?.id || null;
+  const [initialJob, setInitialJob] = useState<JobProfile | null>(stateJob);
+  const [isLoadingInitialJob, setIsLoadingInitialJob] = useState(Boolean(mode !== 'create' && jobId && !stateJob));
+
+  useEffect(() => {
+    if (stateJob) {
+      setInitialJob(stateJob);
+      setIsLoadingInitialJob(false);
+      return;
+    }
+
+    if (mode === 'create' || !jobId) {
+      setInitialJob(null);
+      setIsLoadingInitialJob(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingInitialJob(true);
+
+    void withRetry(() => getJobById(jobId), {
+      attempts: 3,
+      delaysMs: [0, 900, 2200],
+      onRetry: (error, attempt) => {
+        console.warn(`Retrying recruiter flow job loader for ${jobId} after failed attempt ${attempt}:`, error);
+      },
+    }).then((job) => {
+      if (cancelled) return;
+      setInitialJob(job || null);
+      setIsLoadingInitialJob(false);
+    }).catch((error) => {
+      console.error(`Failed to load recruiter flow job ${jobId}:`, error);
+      if (cancelled) return;
+      setInitialJob(null);
+      setIsLoadingInitialJob(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId, mode, stateJob]);
+
+  if (isLoadingInitialJob) {
+    return <div className="p-8 text-center">{text('Loading job...', 'Caricamento job...')}</div>;
+  }
+
+  if (mode !== 'create' && !initialJob) {
+    return (
+      <div className="p-8 text-center mt-20">
+        {text('Job reference missing. Please navigate from Dashboard.', 'Riferimento job mancante. Torna alla dashboard.')}
+        <br />
+        <button className="mt-4 text-orange-500 font-bold hover:underline" onClick={() => navigate('/recruiter/dashboard')}>
+          {text('Back', 'Indietro')}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <RecruiterFlow
+      recruiter={recruiter}
+      mode={mode}
+      initialJob={initialJob}
+      onBack={() => navigate('/recruiter/dashboard')}
+    />
+  );
+};
+
+const RecruiterQuizWrapper: React.FC = () => {
+  const { text } = useLanguage();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { job, isLoadingJob, loadingEl, missingEl } = useJobLoader('/recruiter/dashboard');
+  const searchParams = new URLSearchParams(location.search);
+  const pendingCandidateId = searchParams.get('pendingCandidateId');
+  const statePendingCandidate = (location.state as { pendingCandidate?: CandidateProfile } | null)?.pendingCandidate ?? null;
+  const [pendingCandidate, setPendingCandidate] = useState<CandidateProfile | null>(statePendingCandidate);
+  const [isLoadingPendingCandidate, setIsLoadingPendingCandidate] = useState(Boolean(pendingCandidateId && !statePendingCandidate));
+
+  useEffect(() => {
+    if (statePendingCandidate) {
+      setPendingCandidate(statePendingCandidate);
+      setIsLoadingPendingCandidate(false);
+      return;
+    }
+
+    if (!pendingCandidateId) {
+      setPendingCandidate(null);
+      setIsLoadingPendingCandidate(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingPendingCandidate(true);
+
+    void withRetry(() => getCandidate(pendingCandidateId), {
+      attempts: 3,
+      delaysMs: [0, 900, 2200],
+      onRetry: (error, attempt) => {
+        console.warn(`Retrying pending questionnaire candidate loader for ${pendingCandidateId} after failed attempt ${attempt}:`, error);
+      },
+    }).then((candidate) => {
+      if (cancelled) return;
+      setPendingCandidate(candidate || null);
+      setIsLoadingPendingCandidate(false);
+    }).catch((error) => {
+      console.error(`Failed to load pending questionnaire candidate ${pendingCandidateId}:`, error);
+      if (cancelled) return;
+      setPendingCandidate(null);
+      setIsLoadingPendingCandidate(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingCandidateId, statePendingCandidate]);
+
+  if (isLoadingJob || isLoadingPendingCandidate) return loadingEl;
+  if (!job) return missingEl;
+
+  return (
+    <QuizEditor
+      job={job}
+      pendingCandidate={pendingCandidate}
+      onBack={() => navigate('/recruiter/dashboard')}
+      onSaved={() => navigate('/recruiter/dashboard')}
+    />
+  );
+};
 
 const SeekerEvaluationWrapper: React.FC<{
   candidate: CandidateProfile | null;
@@ -279,7 +500,7 @@ const SeekerEvaluationWrapper: React.FC<{
       candidate={candidate}
       onBack={() => navigate('/seeker/dashboard')}
       onUpdateCandidate={onUpdateCandidate}
-      onOpenProfileRefine={() => navigate('/seeker/profile', { state: { returnTo: `/seeker/evaluation/${job.id}`, startStep: 3 } })}
+      onOpenProfileRefine={() => navigate(buildPathWithQuery('/seeker/profile', { returnTo: `/seeker/evaluation/${job.id}`, startStep: 3 }))}
     />
   );
 };
@@ -364,15 +585,33 @@ const AppRoutes: React.FC = () => {
   const [currentRecruiter, setCurrentRecruiter] = useState<RecruiterProfile | null>(null);
 
   const finalizePendingSeekerInterest = async (candidateProfile: CandidateProfile | undefined) => {
-    const pendingJobId = loadPendingJobInterest();
+    const pendingInterest = loadPendingJobInterest();
     const targetCandidateId = effectiveProfileId || candidateProfile?.id;
-    if (!targetCandidateId || !pendingJobId) return false;
+    if (!targetCandidateId || !pendingInterest?.jobId) return false;
+
+    if (pendingInterest.inviteOnly) {
+      const candidateEmail = candidateProfile?.contacts.email?.trim().toLowerCase() || '';
+      const isInvited = candidateEmail
+        ? await isEmailInvitedToJob(pendingInterest.jobId, candidateEmail)
+        : false;
+
+      if (!isInvited) {
+        clearPendingJobInterest();
+        toast.error(
+          text(
+            'This invited job can only be attached to the same email address that received the invitation.',
+            'Questo job invitato può essere collegato solo allo stesso indirizzo email che ha ricevuto l’invito.'
+          )
+        );
+        return false;
+      }
+    }
 
     try {
-      await applyToJob(targetCandidateId, pendingJobId);
+      await applyToJob(targetCandidateId, pendingInterest.jobId);
       clearPendingJobInterest();
 
-      const linkedJob = await getJobById(pendingJobId);
+      const linkedJob = await getJobById(pendingInterest.jobId);
       toast.success(
         linkedJob?.title
           ? text(`Interest registered for ${linkedJob.title}.`, `Interesse registrato per ${linkedJob.title}.`)
@@ -406,14 +645,36 @@ const AppRoutes: React.FC = () => {
     let cancelled = false;
     const loadProfile = async () => {
       if (effectiveUserRole === 'seeker') {
-        const profile = await getCandidate(effectiveProfileId);
-        if (!cancelled && profile) {
-          invalidateSeekerMatchCache(profile.id);
-          setCurrentCandidate(profile);
+        try {
+          const profile = await withRetry(() => getCandidate(effectiveProfileId), {
+            attempts: 3,
+            delaysMs: [0, 900, 2200],
+            onRetry: (error, attempt) => {
+              console.warn(`Retrying seeker profile load for ${effectiveProfileId} after failed attempt ${attempt}:`, error);
+            },
+          });
+          if (!cancelled && profile) {
+            invalidateSeekerMatchCache(profile.id);
+            setCurrentCandidate(profile);
+          }
+        } catch (error) {
+          console.error(`Failed to load seeker profile ${effectiveProfileId}:`, error);
+          if (!cancelled) setCurrentCandidate(null);
         }
       } else if (effectiveUserRole === 'recruiter') {
-        const profile = await getRecruiter(effectiveProfileId);
-        if (!cancelled && profile) setCurrentRecruiter(profile);
+        try {
+          const profile = await withRetry(() => getRecruiter(effectiveProfileId), {
+            attempts: 3,
+            delaysMs: [0, 900, 2200],
+            onRetry: (error, attempt) => {
+              console.warn(`Retrying recruiter profile load for ${effectiveProfileId} after failed attempt ${attempt}:`, error);
+            },
+          });
+          if (!cancelled && profile) setCurrentRecruiter(profile);
+        } catch (error) {
+          console.error(`Failed to load recruiter profile ${effectiveProfileId}:`, error);
+          if (!cancelled) setCurrentRecruiter(null);
+        }
       }
     };
     loadProfile();
@@ -426,7 +687,10 @@ const AppRoutes: React.FC = () => {
     const searchParams = new URLSearchParams(location.search);
     const linkedJobId = searchParams.get('job');
     if (location.pathname === '/auth' && linkedJobId) {
-      savePendingJobInterest(linkedJobId);
+      savePendingJobInterest({
+        jobId: linkedJobId,
+        inviteOnly: searchParams.get('invite') === '1',
+      });
     }
 
     if (!authLoading && user && effectiveUserRole) {
@@ -446,8 +710,10 @@ const AppRoutes: React.FC = () => {
       // Only auto-redirect from auth pages when there is no saved route to restore
       const savedRoute = sessionStorage.getItem('lastRoute');
       const hasRestorableRoute = Boolean(savedRoute) && savedRoute !== '/';
+      const isRecoveringPassword = hasPendingPasswordRecovery();
       const shouldAutoRedirect = (location.pathname === '/auth' || location.pathname === '/recruiter-auth') &&
-                                !hasRestorableRoute;
+                                !hasRestorableRoute &&
+                                !isRecoveringPassword;
 
       if (shouldAutoRedirect) {
         if (effectiveUserRole === 'seeker') {
@@ -468,8 +734,8 @@ const AppRoutes: React.FC = () => {
       return;
     }
 
-    const pendingJobId = loadPendingJobInterest();
-    if (!pendingJobId) {
+    const pendingInterest = loadPendingJobInterest();
+    if (!pendingInterest?.jobId) {
       return;
     }
 
@@ -479,6 +745,51 @@ const AppRoutes: React.FC = () => {
       }
     });
   }, [user, effectiveUserRole, currentCandidate, location.pathname, navigate]);
+
+  useEffect(() => {
+    if (
+      authLoading ||
+      !user ||
+      isImpersonating ||
+      !hasPendingPasswordRecovery()
+    ) {
+      return;
+    }
+
+    if (effectiveUserRole === 'recruiter' && location.pathname !== '/recruiter/settings') {
+      toast.info(
+        text(
+          'Set a new password to complete the recovery flow.',
+          'Imposta una nuova password per completare il recupero.'
+        )
+      );
+      navigate(buildPathWithQuery('/recruiter/settings', { tab: 'security', forcePasswordChange: 1 }), { replace: true });
+      return;
+    }
+
+    if (effectiveUserRole === 'seeker' && location.pathname !== '/seeker/settings') {
+      toast.info(
+        text(
+          'Set a new password to complete the recovery flow.',
+          'Imposta una nuova password per completare il recupero.'
+        )
+      );
+      navigate(buildPathWithQuery('/seeker/settings', { tab: 'security', forcePasswordChange: 1 }), { replace: true });
+      return;
+    }
+
+    if (effectiveUserRole === 'admin') {
+      clearPendingPasswordRecovery();
+    }
+  }, [
+    authLoading,
+    user,
+    effectiveUserRole,
+    isImpersonating,
+    location.pathname,
+    navigate,
+    text,
+  ]);
 
   useEffect(() => {
     if (
@@ -498,7 +809,7 @@ const AppRoutes: React.FC = () => {
           'Cambia la password temporanea prima di continuare.'
         )
       );
-      navigate('/recruiter/settings', { replace: true, state: { tab: 'security', forcePasswordChange: true } });
+      navigate(buildPathWithQuery('/recruiter/settings', { tab: 'security', forcePasswordChange: 1 }), { replace: true });
     }
   }, [
     authLoading,
@@ -506,6 +817,37 @@ const AppRoutes: React.FC = () => {
     effectiveUserRole,
     isImpersonating,
     currentRecruiter?.must_change_password,
+    location.pathname,
+    navigate,
+    text,
+  ]);
+
+  useEffect(() => {
+    if (
+      authLoading ||
+      !user ||
+      effectiveUserRole !== 'seeker' ||
+      isImpersonating ||
+      !currentCandidate?.must_change_password
+    ) {
+      return;
+    }
+
+    if (location.pathname !== '/seeker/settings') {
+      toast.info(
+        text(
+          'Please change your temporary password before continuing.',
+          'Cambia la password temporanea prima di continuare.'
+        )
+      );
+      navigate(buildPathWithQuery('/seeker/settings', { tab: 'security', forcePasswordChange: 1 }), { replace: true });
+    }
+  }, [
+    authLoading,
+    user,
+    effectiveUserRole,
+    isImpersonating,
+    currentCandidate?.must_change_password,
     location.pathname,
     navigate,
     text,
@@ -589,7 +931,9 @@ const AppRoutes: React.FC = () => {
 
   // --- Render ---
 
-  if (authLoading) return <div className="flex h-screen items-center justify-center">Loading PeakTalent...</div>;
+  // Don't block the public marketing page on auth bootstrapping — visitors who
+  // are not logged in still need to see the hero immediately for a good LCP.
+  if (authLoading && !isMarketingRoute) return <div className="flex h-screen items-center justify-center">Loading PeakTalent...</div>;
 
   return (
     <div className={isMarketingRoute ? 'min-h-screen bg-[#f7fafc] text-slate-900' : 'platform-shell flex min-h-screen flex-col bg-slate-50 font-sans text-slate-900 transition-colors duration-200 dark:bg-slate-900 dark:text-slate-100'}>
@@ -597,13 +941,16 @@ const AppRoutes: React.FC = () => {
 
       <main className={isMarketingRoute ? 'w-full' : 'flex-grow w-full pt-[54px] sm:pt-16'}>
         <ErrorBoundary resetKey={location.pathname}>
-        <Suspense fallback={<div className="p-10 text-center">{text('Loading...', 'Caricamento...')}</div>}>
+        <Suspense fallback={<PageSkeleton />}>
         <Routes>
           {/* Public Routes */}
           <Route path="/" element={<MarketingHomePage onEnterPlatform={() => navigate('/platform')} onLogin={showLoginFlow} />} />
           <Route path="/platform" element={<RoleSelectionWrapper onSelectRecruiter={showRecruiterFlow} onSelectSeeker={showSeekerFlow} onLogin={showLoginFlow} />} />
           <Route path="/auth" element={<Auth onAuthSuccess={handleAuthSuccess} />} />
           <Route path="/recruiter-auth" element={<RecruiterAuth onAuthSuccess={handleRecruiterAuthSuccess} />} />
+          <Route path="/terms" element={<TermsAndConditionsPage />} />
+          <Route path="/privacy-policy" element={<PrivacyPolicyPage />} />
+          <Route path="/cookie-policy" element={<CookiePolicyPage />} />
           {isDev && <Route path="/debug" element={<Navigate to="/admin/dashboard" replace />} />}
 
           {/* Seeker Protected Routes */}
@@ -614,9 +961,9 @@ const AppRoutes: React.FC = () => {
                 <JobSeekerHomePage
                   candidate={currentCandidate}
                   setPage={async (page, data) => {
-                    if (page === 'settings') navigate('/seeker/settings', { state: data?.tab ? { tab: data.tab } : null });
+                    if (page === 'settings') navigate(buildPathWithQuery('/seeker/settings', { tab: data?.tab }));
                     if (page === 'jobDetails' && data?.job) navigate(`/seeker/job/${data.job.id}`, { state: { job: data.job } });
-                    if (page === 'application') navigate('/seeker/profile', { state: data?.startStep ? { startStep: data.startStep } : null });
+                    if (page === 'application') navigate(buildPathWithQuery('/seeker/profile', { startStep: data?.startStep }));
                     if (page === 'profileView') navigate('/seeker/view-profile');
                     if (page === 'jobBoard') navigate('/seeker/jobs');
                     if (page === 'evaluation' && data?.job) navigate(`/seeker/evaluation/${data.job.id}`, { state: { job: data.job } });
@@ -631,7 +978,7 @@ const AppRoutes: React.FC = () => {
                     }
                   }}
                 />
-              ) : <div>Loading Profile...</div>}
+              ) : <PageSkeleton />}
               </RequireRole>
             </RequireAuth>
           } />
@@ -639,21 +986,27 @@ const AppRoutes: React.FC = () => {
           <Route path="/seeker/profile" element={
             <RequireAuth><RequireRole role="seeker">
               {currentCandidate ? (
-                <div className="p-4">
-                  <JobSeekerFlow
-                    candidate={currentCandidate}
-                    isEditing={true}
-                    initialStep={(location.state as { startStep?: number } | null)?.startStep}
-                    onGoToDashboard={() => {
-                      const returnTo = (location.state as { returnTo?: string } | null)?.returnTo;
-                      navigate(returnTo || '/seeker/dashboard');
-                    }}
-                    onProfileUpdate={async (p) => {
-                      invalidateSeekerMatchCache(p.id);
-                      setCurrentCandidate(p);
-                    }}
-                  />
-                </div>
+                (() => {
+                  const searchParams = new URLSearchParams(location.search);
+                  const startStep = Number(searchParams.get('startStep') || '');
+                  const returnTo = searchParams.get('returnTo') || '';
+                  return (
+                    <div className="p-4">
+                      <JobSeekerFlow
+                        candidate={currentCandidate}
+                        isEditing={true}
+                        initialStep={Number.isFinite(startStep) && startStep > 0 ? startStep : undefined}
+                        onGoToDashboard={() => {
+                          navigate(returnTo || '/seeker/dashboard');
+                        }}
+                        onProfileUpdate={async (p) => {
+                          invalidateSeekerMatchCache(p.id);
+                          setCurrentCandidate(p);
+                        }}
+                      />
+                    </div>
+                  );
+                })()
               ) : <div>Loading...</div>}
             </RequireRole></RequireAuth>
           } />
@@ -663,10 +1016,16 @@ const AppRoutes: React.FC = () => {
               {currentCandidate ? (
                 <CandidateProfileView
                   candidate={currentCandidate}
-                  onEdit={() => navigate('/seeker/settings', { state: { tab: 'profile' } })}
+                  onEdit={() => navigate(buildPathWithQuery('/seeker/settings', { tab: 'profile' }))}
                   onBack={() => navigate('/seeker/dashboard')}
                 />
               ) : <div>Loading...</div>}
+            </RequireRole></RequireAuth>
+          } />
+
+          <Route path="/seeker/how-matching-works" element={
+            <RequireAuth><RequireRole role="seeker">
+              <HowMatchingWorksPage />
             </RequireRole></RequireAuth>
           } />
 
@@ -710,7 +1069,7 @@ const AppRoutes: React.FC = () => {
                     invalidateSeekerMatchCache(p.id);
                     setCurrentCandidate(p);
                   }}
-                  onOpenProfileRefine={() => navigate('/seeker/profile', { state: { startStep: 3 } })}
+                  onOpenProfileRefine={() => navigate(buildPathWithQuery('/seeker/profile', { startStep: 3 }))}
                   onLogout={async () => {
                     if (isImpersonating) {
                       stopImpersonation();
@@ -722,8 +1081,12 @@ const AppRoutes: React.FC = () => {
                       navigate('/', { replace: true });
                     }
                   }}
-                  onDeleteAccount={async () => { toast.info('Account deletion is coming soon.'); }}
-                  initialTab={(location.state as { tab?: 'profile' | 'privacy_visibility' | 'security' | 'ai_data' | 'notifications' | 'matching' } | null)?.tab}
+                  onDeleteAccount={() => {}}
+                  initialTab={(new URLSearchParams(location.search).get('tab') as 'profile' | 'privacy_visibility' | 'security' | 'ai_data' | 'notifications' | 'matching' | null) || undefined}
+                  requirePasswordChange={Boolean(
+                    (currentCandidate.must_change_password || hasPendingPasswordRecovery()) &&
+                    new URLSearchParams(location.search).get('forcePasswordChange')
+                  )}
                 />
               ) : <div>Loading...</div>}
             </RequireRole></RequireAuth>
@@ -736,15 +1099,26 @@ const AppRoutes: React.FC = () => {
                 <RecruiterHomePage
                   recruiter={currentRecruiter}
                   onNavigate={(page, data) => {
-                    if (page === 'jobFlow') navigate('/recruiter/curate', { state: data });
-                    if (page === 'profileSetup' || page === 'editProfile') navigate('/recruiter/settings', { state: { tab: 'profile' } });
-                    if (page === 'settings') navigate('/recruiter/settings', { state: data?.tab ? { tab: data.tab } : null });
+                    if (page === 'jobFlow') navigate(buildPathWithQuery('/recruiter/curate', { mode: data?.mode, jobId: data?.job?.id }), data ? { state: data } : undefined);
+                    if (page === 'profileSetup' || page === 'editProfile') navigate(buildPathWithQuery('/recruiter/settings', { tab: 'profile' }));
+                    if (page === 'settings') navigate(buildPathWithQuery('/recruiter/settings', { tab: data?.tab }));
                     if (page === 'matches' && data?.job) navigate(`/recruiter/matches/${data.job.id}`, { state: { job: data.job } });
                     if (page === 'jobDetails' && data?.job) navigate(`/recruiter/job/${data.job.id}`, { state: { job: data.job } });
+                    if (page === 'analytics' && data?.job) navigate(`/recruiter/job/${data.job.id}/analytics`, { state: { job: data.job } });
+                    if (page === 'pipeline' && data?.job) navigate(`/recruiter/job/${data.job.id}/pipeline`, { state: { job: data.job } });
                     if (page === 'quizEditor' && data?.job) navigate(`/recruiter/quiz/${data.job.id}`, { state: { job: data.job } });
+                    if (page === 'candidates') navigate('/recruiter/candidates');
                   }}
                 />
-              ) : <div>Recruiter Profile Loading...</div>}
+              ) : <PageSkeleton />}
+            </RequireRole></RequireAuth>
+          } />
+
+          <Route path="/recruiter/candidates" element={
+            <RequireAuth><RequireRole role="recruiter">
+              {currentRecruiter ? (
+                <RecruiterCandidatesPage recruiter={currentRecruiter} />
+              ) : <PageSkeleton />}
             </RequireRole></RequireAuth>
           } />
 
@@ -769,24 +1143,15 @@ const AppRoutes: React.FC = () => {
           <Route path="/recruiter/curate" element={
             <RequireAuth><RequireRole role="recruiter">
               {currentRecruiter ? (
-                <RecruiterFlow
-                  recruiter={currentRecruiter}
-                  mode={location.state?.mode || 'create'}
-                  initialJob={location.state?.job || null}
-                  onBack={() => navigate('/recruiter/dashboard')}
-                />
+                <RecruiterCurateWrapper recruiter={currentRecruiter} />
               ) : <div className="p-8 text-center">Loading Recruiter Profile...</div>}
             </RequireRole></RequireAuth>
           } />
 
           <Route path="/recruiter/quiz/:jobId" element={
             <RequireAuth><RequireRole role="recruiter">
-              {currentRecruiter && location.state?.job ? (
-                <QuizEditor
-                  job={location.state.job}
-                  onBack={() => navigate('/recruiter/dashboard')}
-                  onSaved={() => navigate('/recruiter/dashboard')}
-                />
+              {currentRecruiter ? (
+                <RecruiterQuizWrapper />
               ) : <div className="p-8 text-center" onClick={() => navigate('/recruiter/dashboard')} style={{cursor:'pointer'}}>Loading... (click to go back to dashboard)</div>}
             </RequireRole></RequireAuth>
           } />
@@ -798,6 +1163,7 @@ const AppRoutes: React.FC = () => {
                   recruiter={currentRecruiter}
                   onUpdateProfile={(profile) => setCurrentRecruiter(profile)}
                   onBack={() => navigate('/recruiter/dashboard')}
+                  onOpenJobArchive={() => navigate(buildPathWithQuery('/recruiter/dashboard', { view: 'archive' }))}
                   onLogout={async () => {
                     if (isImpersonating) {
                       stopImpersonation();
@@ -809,10 +1175,10 @@ const AppRoutes: React.FC = () => {
                       navigate('/', { replace: true });
                     }
                   }}
-                  initialTab={(location.state as { tab?: 'profile' | 'notifications' | 'security' | 'company' } | null)?.tab}
+                  initialTab={(new URLSearchParams(location.search).get('tab') as 'profile' | 'notifications' | 'security' | 'company' | null) || undefined}
                   requirePasswordChange={Boolean(
-                    currentRecruiter.must_change_password &&
-                    (location.state as { forcePasswordChange?: boolean } | null)?.forcePasswordChange
+                    (currentRecruiter.must_change_password || hasPendingPasswordRecovery()) &&
+                    new URLSearchParams(location.search).get('forcePasswordChange')
                   )}
                 />
               ) : <div>Loading...</div>}
@@ -828,6 +1194,18 @@ const AppRoutes: React.FC = () => {
           <Route path="/recruiter/job/:id" element={
             <RequireAuth><RequireRole role="recruiter">
               <RecruiterJobDetailsWrapper />
+            </RequireRole></RequireAuth>
+          } />
+
+          <Route path="/recruiter/job/:id/analytics" element={
+            <RequireAuth><RequireRole role="recruiter">
+              <RecruiterAnalyticsWrapper />
+            </RequireRole></RequireAuth>
+          } />
+
+          <Route path="/recruiter/job/:id/pipeline" element={
+            <RequireAuth><RequireRole role="recruiter">
+              <RecruiterPipelineWrapper />
             </RequireRole></RequireAuth>
           } />
 

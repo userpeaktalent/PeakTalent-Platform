@@ -1,5 +1,6 @@
 
-import { CandidateProfile, JobProfile, User, RecruiterProfile, Notification, TechnicalTest } from '../types';
+import { CandidateProfile, JobProfile, User, RecruiterProfile, Notification, TechnicalTest, MatchingPillarWeights, PrestigeListOverride } from '../types';
+import { logActivity } from './activityLogService';
 import { attachEmbeddingMetadata } from './embeddingService';
 import {
     buildNormalizedFullName,
@@ -9,20 +10,133 @@ import {
     normalizeRecruiterProfileNames,
 } from '../utils/nameFormat';
 import { createIsolatedSupabaseClient, supabase } from './supabaseClient';
-import { generateTechnicalTestForJob } from './geminiService';
+import { generateTechnicalTestForJob, translateCandidateText, translateProfessionalSummary } from './geminiService';
 import {
     getEffectiveProfileId,
     getEffectiveUserEmail,
     loadAdminImpersonation,
 } from './impersonationService';
-import { buildSeekerJobUrl, sendRecruiterInviteEmail } from './recruiterEmailService';
+import { buildSeekerJobUrl, EMAIL_SENDING_PAUSED_MESSAGE, sendRecruiterInviteEmail } from './recruiterEmailService';
+import { getCurrentQuizResult, isJobQuizEnabled, normalizeJobQuestionnaireState } from '../utils/questionnaire';
 
 const normalizeRecruiterProfile = (recruiter: RecruiterProfile): RecruiterProfile => ({
     ...normalizeRecruiterProfileNames(recruiter),
     company_visibility: recruiter.company_visibility ?? true,
 });
 
-const isJobVisibleToSeekers = (job: JobProfile): boolean => job.visible_to_seekers !== false;
+const ensureLocalizedCandidateSummary = async (candidate: CandidateProfile): Promise<CandidateProfile> => {
+    const summaryText = candidate.summary_text?.trim();
+    if (!summaryText) {
+        return candidate;
+    }
+
+    const localizedCandidate: CandidateProfile = {
+        ...candidate,
+        summary_text: summaryText,
+    };
+
+    const needsItalian = !localizedCandidate.summary_text_it?.trim();
+    const needsEnglish = !localizedCandidate.summary_text_en?.trim();
+
+    if (!needsItalian && !needsEnglish) {
+        return localizedCandidate;
+    }
+
+    try {
+        const [translatedItalian, translatedEnglish] = await Promise.all([
+            needsItalian ? translateProfessionalSummary(summaryText, 'it') : Promise.resolve(localizedCandidate.summary_text_it || ''),
+            needsEnglish ? translateProfessionalSummary(summaryText, 'en') : Promise.resolve(localizedCandidate.summary_text_en || ''),
+        ]);
+
+        if (needsItalian && translatedItalian.trim()) {
+            localizedCandidate.summary_text_it = translatedItalian.trim();
+        }
+
+        if (needsEnglish && translatedEnglish.trim()) {
+            localizedCandidate.summary_text_en = translatedEnglish.trim();
+        }
+    } catch (error) {
+        console.warn('Unable to localize candidate summary during save:', error);
+    }
+
+    return localizedCandidate;
+};
+
+const localizeCandidateTextFields = async (
+    value: string | undefined,
+    currentItalian: string | undefined,
+    currentEnglish: string | undefined,
+    context: 'work experience description' | 'education description',
+) => {
+    const sourceText = value?.trim();
+    if (!sourceText) {
+        return { it: currentItalian, en: currentEnglish };
+    }
+
+    const needsItalian = !currentItalian?.trim();
+    const needsEnglish = !currentEnglish?.trim();
+
+    if (!needsItalian && !needsEnglish) {
+        return { it: currentItalian, en: currentEnglish };
+    }
+
+    try {
+        const [translatedItalian, translatedEnglish] = await Promise.all([
+            needsItalian ? translateCandidateText(sourceText, 'it', context) : Promise.resolve(currentItalian || ''),
+            needsEnglish ? translateCandidateText(sourceText, 'en', context) : Promise.resolve(currentEnglish || ''),
+        ]);
+
+        return {
+            it: needsItalian && translatedItalian.trim() ? translatedItalian.trim() : currentItalian,
+            en: needsEnglish && translatedEnglish.trim() ? translatedEnglish.trim() : currentEnglish,
+        };
+    } catch (error) {
+        console.warn(`Unable to localize candidate ${context}:`, error);
+        return { it: currentItalian, en: currentEnglish };
+    }
+};
+
+export const ensureLocalizedCandidateContent = async (candidate: CandidateProfile): Promise<CandidateProfile> => {
+    const localizedCandidate = await ensureLocalizedCandidateSummary(candidate);
+
+    const localizedExperiences = await Promise.all((localizedCandidate.experiences || []).map(async (experience) => {
+        const localized = await localizeCandidateTextFields(
+            experience.description,
+            experience.description_it,
+            experience.description_en,
+            'work experience description',
+        );
+
+        return {
+            ...experience,
+            description_it: localized.it,
+            description_en: localized.en,
+        };
+    }));
+
+    const localizedEducation = await Promise.all((localizedCandidate.education || []).map(async (education) => {
+        const localized = await localizeCandidateTextFields(
+            education.description,
+            education.description_it,
+            education.description_en,
+            'education description',
+        );
+
+        return {
+            ...education,
+            description_it: localized.it,
+            description_en: localized.en,
+        };
+    }));
+
+    return {
+        ...localizedCandidate,
+        experiences: localizedExperiences,
+        education: localizedEducation,
+    };
+};
+
+const isJobVisibleToSeekers = (job: JobProfile): boolean => job.visible_to_seekers !== false && job.is_archived !== true;
 
 const resolveEffectiveViewerRole = async (): Promise<'seeker' | 'recruiter' | 'admin' | null> => {
     const impersonation = loadAdminImpersonation();
@@ -420,15 +534,20 @@ const resolveCandidateApplicationProfileId = async (email: string, candidateRefe
 };
 
 const ensureJobTechnicalTest = async (job: JobProfile): Promise<JobProfile> => {
+    if (job.requires_quiz === false) {
+        throw new Error('The questionnaire is currently disabled for this role.');
+    }
+
     if (job.technical_test?.questions?.length) {
-        return job;
+        return normalizeJobQuestionnaireState({ ...job, requires_quiz: true });
     }
 
     const generatedTest = await generateTechnicalTestForJob(job);
-    const nextJob: JobProfile = {
+    const nextJob: JobProfile = normalizeJobQuestionnaireState({
         ...job,
+        requires_quiz: true,
         technical_test: generatedTest,
-    };
+    });
 
     const impersonation = loadAdminImpersonation();
 
@@ -472,7 +591,7 @@ const ensureJobTechnicalTest = async (job: JobProfile): Promise<JobProfile> => {
     return nextJob;
 };
 
-const updateCandidateApplicationStatus = async (
+export const updateApplicationStatus = async (
     candidateProfileId: string,
     jobId: string,
     status: string
@@ -564,7 +683,7 @@ const getJobsForCandidateViaAdminRpc = async (candidateId: string, candidateEmai
     }
 
     return (((data as AdminCandidateJobRpcRow[]) || []).map((row) => {
-        const job = hydrateEmbedding(row.job_content as JobProfile, row.job_embedding);
+        const job = normalizeJobQuestionnaireState(hydrateEmbedding(row.job_content as JobProfile, row.job_embedding));
         return {
             ...job,
             applicant_emails: Array.from(new Set([...(job.applicant_emails || []), candidateEmail])),
@@ -599,7 +718,7 @@ const getCandidateJobsWithStatusViaRpc = async (
     }, {});
 
     const jobs = rows.map((row) => {
-        const job = hydrateEmbedding(row.job_content as JobProfile, row.job_embedding);
+        const job = normalizeJobQuestionnaireState(hydrateEmbedding(row.job_content as JobProfile, row.job_embedding));
         return {
             ...job,
             applicant_emails: Array.from(new Set([...(job.applicant_emails || []), candidateEmail])),
@@ -659,7 +778,7 @@ const getJobsForCandidateViaImpersonatedSession = async (candidateId: string): P
         if (jobsError) throw jobsError;
 
         return (jobs || []).map((row) => {
-            const job = hydrateEmbedding(row.content as JobProfile, row.embedding);
+            const job = normalizeJobQuestionnaireState(hydrateEmbedding(row.content as JobProfile, row.embedding));
             return { ...job, applicant_emails: Array.from(new Set([...(job.applicant_emails || []), impersonation.email])) };
         });
     }).catch((err) => {
@@ -1000,11 +1119,12 @@ export const deleteUser = async (email: string): Promise<void> => {
 
 // --- Candidates ---
 
-export const addCandidate = async (candidate: CandidateProfile): Promise<any> => {
+export const addCandidate = async (candidate: CandidateProfile): Promise<CandidateProfile> => {
     const normalizedCandidate = normalizeCandidateProfileNames(candidate);
+    const localizedCandidate = await ensureLocalizedCandidateContent(normalizedCandidate);
     const enriched = await attachEmbeddingMetadata({
-        ...normalizedCandidate,
-        terms_and_conditions_accepted: normalizedCandidate.terms_and_conditions_accepted ?? true,
+        ...localizedCandidate,
+        terms_and_conditions_accepted: localizedCandidate.terms_and_conditions_accepted ?? true,
     }, 'candidate');
     const actor = await resolveEffectiveActor();
     const normalizedEnriched = normalizeCandidateProfileNames(enriched);
@@ -1015,7 +1135,7 @@ export const addCandidate = async (candidate: CandidateProfile): Promise<any> =>
 
     const savedViaAdminConsole = await saveCandidateViaAdminConsoleRpc(normalizedEnriched);
     if (savedViaAdminConsole) {
-        return candidate.id;
+        return normalizedEnriched;
     }
 
     const savedViaImpersonation = await saveCandidateViaImpersonatedSession(normalizedEnriched);
@@ -1037,7 +1157,22 @@ export const addCandidate = async (candidate: CandidateProfile): Promise<any> =>
         if (error) throw error;
     }
 
-    return candidate.id;
+    void logActivity({
+        eventType: 'candidate_profile_saved',
+        source: 'dbService',
+        purpose: 'candidate_profile_save',
+        entityType: 'candidate',
+        entityId: normalizedEnriched.id,
+        entityLabel: fullName || normalizedEnriched.contacts.email || normalizedEnriched.id,
+        summary: `Saved candidate profile for ${fullName || normalizedEnriched.contacts.email || 'candidate'}.`,
+        metadata: {
+            email: normalizedEnriched.contacts.email || null,
+            current_job_function: normalizedEnriched.current_job_function || null,
+            current_seniority_level: normalizedEnriched.current_seniority_level || null,
+        },
+    });
+
+    return normalizedEnriched;
 };
 
 export const createNewUserAndCandidateProfile = async (user: User, candidate: CandidateProfile): Promise<void> => {
@@ -1186,8 +1321,9 @@ export const addJob = async (job: JobProfile): Promise<any> => {
     const actor = await resolveEffectiveActor();
     const recruiterBranding = await loadRecruiterBrandingForJob(actor.profileId || job.recruiter_id || null);
 
+    const normalizedJob = normalizeJobQuestionnaireState(applyRecruiterBrandingToJob(job, actor.profileId, recruiterBranding));
     const enriched = await attachEmbeddingMetadata({
-        ...applyRecruiterBrandingToJob(job, actor.profileId, recruiterBranding),
+        ...normalizedJob,
     }, 'job');
 
     const jobRow = {
@@ -1203,6 +1339,20 @@ export const addJob = async (job: JobProfile): Promise<any> => {
         if (actor.profileId && recruiterBranding) {
             await syncRecruiterBrandingAcrossJobs(actor.profileId, recruiterBranding);
         }
+        void logActivity({
+            eventType: 'job_created',
+            source: 'dbService',
+            purpose: 'job_posting_create',
+            entityType: 'job',
+            entityId: job.id,
+            entityLabel: enriched.title || job.id,
+            summary: `Created job posting "${enriched.title || 'Untitled posting'}".`,
+            metadata: {
+                company_name: enriched.company_name || null,
+                recruiter_id: actor.profileId,
+                seniority_level: enriched.seniority_level || null,
+            },
+        });
         return job.id;
     }
 
@@ -1239,29 +1389,57 @@ export const addJob = async (job: JobProfile): Promise<any> => {
     if (actor.profileId && recruiterBranding) {
         await syncRecruiterBrandingAcrossJobs(actor.profileId, recruiterBranding);
     }
+    void logActivity({
+        eventType: 'job_updated',
+        source: 'dbService',
+        purpose: 'job_posting_update',
+        entityType: 'job',
+        entityId: job.id,
+        entityLabel: enriched.title || job.id,
+        summary: `Updated job posting "${enriched.title || 'Untitled posting'}".`,
+        metadata: {
+            company_name: enriched.company_name || null,
+            recruiter_id: actor.profileId,
+            seniority_level: enriched.seniority_level || null,
+        },
+    });
     return job.id;
 };
 
 export const saveJobTechnicalTest = async (job: JobProfile, test: TechnicalTest): Promise<void> => {
-    const updatedJob: JobProfile = { ...job, technical_test: test };
+    const updatedJob: JobProfile = normalizeJobQuestionnaireState({ ...job, technical_test: test, requires_quiz: true });
     const { error } = await supabase
         .from('jobs')
         .update({ content: updatedJob })
         .eq('id', job.id);
     if (error) throw error;
+
+    void logActivity({
+        eventType: 'job_updated',
+        source: 'dbService',
+        purpose: 'job_technical_test_save',
+        entityType: 'job',
+        entityId: job.id,
+        entityLabel: job.title || job.id,
+        summary: `Saved technical questionnaire for "${job.title || 'Untitled posting'}".`,
+        metadata: {
+            question_count: test.questions?.length || 0,
+        },
+    });
 };
 
 export const saveScoreOverride = async (
     job: JobProfile,
     candidateId: string,
     score: number,
-    reason?: string
+    previousScore: number,
+    reason: string
 ): Promise<JobProfile> => {
     const updatedJob: JobProfile = {
         ...job,
         score_overrides: {
             ...(job.score_overrides ?? {}),
-            [candidateId]: { score, reason, overridden_at: new Date().toISOString() },
+            [candidateId]: { score, previous_score: previousScore, reason, overridden_at: new Date().toISOString() },
         },
     };
     const { error } = await supabase.from('jobs').update({ content: updatedJob }).eq('id', job.id);
@@ -1278,17 +1456,349 @@ export const removeScoreOverride = async (job: JobProfile, candidateId: string):
     return updatedJob;
 };
 
+export const saveJobRankingWeights = async (
+    job: JobProfile,
+    rankingWeights: MatchingPillarWeights
+): Promise<JobProfile> => {
+    const updatedJob: JobProfile = {
+        ...job,
+        ranking_weights: rankingWeights,
+    };
+    const { error } = await supabase.from('jobs').update({ content: updatedJob }).eq('id', job.id);
+    if (error) throw error;
+
+    void logActivity({
+        eventType: 'job_updated',
+        source: 'dbService',
+        purpose: 'job_ranking_weights_update',
+        entityType: 'job',
+        entityId: job.id,
+        entityLabel: updatedJob.title || job.id,
+        summary: `Updated ranking weights for "${updatedJob.title || 'Untitled posting'}".`,
+        metadata: {
+            ranking_weights: rankingWeights,
+        },
+    });
+
+    return updatedJob;
+};
+
+export interface SaveJobRankingConfigInput {
+    weights: MatchingPillarWeights;
+    universities: PrestigeListOverride | null;
+    companies: PrestigeListOverride | null;
+}
+
+export const saveJobRankingConfig = async (
+    job: JobProfile,
+    config: SaveJobRankingConfigInput,
+): Promise<JobProfile> => {
+    const updatedJob: JobProfile = {
+        ...job,
+        ranking_weights: config.weights,
+        ranking_universities: config.universities,
+        ranking_companies: config.companies,
+    };
+    const { error } = await supabase.from('jobs').update({ content: updatedJob }).eq('id', job.id);
+    if (error) throw error;
+
+    void logActivity({
+        eventType: 'job_updated',
+        source: 'dbService',
+        purpose: 'job_ranking_config_update',
+        entityType: 'job',
+        entityId: job.id,
+        entityLabel: updatedJob.title || job.id,
+        summary: `Updated ranking config for "${updatedJob.title || 'Untitled posting'}".`,
+        metadata: {
+            ranking_weights: config.weights,
+            ranking_universities_custom: !!config.universities,
+            ranking_companies_custom: !!config.companies,
+        },
+    });
+
+    return updatedJob;
+};
+
+export const saveRecruiterRankingConfig = async (
+    recruiterId: string,
+    config: SaveJobRankingConfigInput,
+): Promise<RecruiterProfile> => {
+    const recruiter = await getRecruiter(recruiterId);
+    if (!recruiter) {
+        throw new Error('The recruiter profile could not be resolved for ranking preferences.');
+    }
+
+    const updatedRecruiter = normalizeRecruiterProfile({
+        ...recruiter,
+        ranking_weights: config.weights,
+        ranking_universities: config.universities,
+        ranking_companies: config.companies,
+    });
+
+    const savedViaAdminRpc = await saveRecruiterViaAdminConsoleRpc(recruiterId, updatedRecruiter);
+
+    if (!savedViaAdminRpc) {
+        const { error } = await supabase.from('recruiters').upsert({
+            id: recruiterId,
+            content: updatedRecruiter,
+        });
+        if (error) throw error;
+    }
+
+    void logActivity({
+        eventType: 'recruiter_profile_saved',
+        source: 'dbService',
+        purpose: 'recruiter_ranking_config_update',
+        entityType: 'recruiter',
+        entityId: recruiterId,
+        entityLabel: updatedRecruiter.company_name || `${updatedRecruiter.first_name} ${updatedRecruiter.last_name}`.trim() || recruiterId,
+        summary: `Updated recruiter ranking preferences for ${updatedRecruiter.company_name || updatedRecruiter.email || 'recruiter'}.`,
+        metadata: {
+            ranking_weights: config.weights,
+            ranking_universities_custom: !!config.universities,
+            ranking_companies_custom: !!config.companies,
+        },
+    });
+
+    return updatedRecruiter;
+};
+
+export const saveCandidateInterestReview = async (
+    job: JobProfile,
+    candidateId: string,
+    decision: 'interested' | 'not_interested'
+): Promise<JobProfile> => {
+    const updatedJob: JobProfile = {
+        ...job,
+        candidate_interest_reviews: {
+            ...(job.candidate_interest_reviews ?? {}),
+            [candidateId]: {
+                decision,
+                updated_at: new Date().toISOString(),
+            },
+        },
+    };
+
+    const { error } = await supabase.from('jobs').update({ content: updatedJob }).eq('id', job.id);
+    if (error) throw error;
+
+    void logActivity({
+        eventType: 'job_updated',
+        source: 'dbService',
+        purpose: decision === 'interested' ? 'candidate_marked_interested' : 'candidate_marked_not_interested',
+        entityType: 'job',
+        entityId: job.id,
+        entityLabel: updatedJob.title || job.id,
+        summary: `${decision === 'interested' ? 'Marked candidate as interested' : 'Marked candidate as not interested'} for "${updatedJob.title || 'Untitled posting'}".`,
+        metadata: {
+            candidate_id: candidateId,
+            decision,
+        },
+    });
+
+    return updatedJob;
+};
+
+export const saveCandidateNote = async (
+    job: JobProfile,
+    candidateId: string,
+    payload: { tags: string[]; note: string },
+): Promise<JobProfile> => {
+    const trimmedTags = (payload.tags || []).map(t => t.trim()).filter(Boolean);
+    const trimmedNote = (payload.note || '').trim();
+
+    const updatedNotes = { ...(job.candidate_notes ?? {}) };
+    if (trimmedTags.length === 0 && trimmedNote.length === 0) {
+        delete updatedNotes[candidateId];
+    } else {
+        updatedNotes[candidateId] = {
+            tags: trimmedTags,
+            note: trimmedNote,
+            updated_at: new Date().toISOString(),
+        };
+    }
+
+    const updatedJob: JobProfile = {
+        ...job,
+        candidate_notes: updatedNotes,
+    };
+
+    const { error } = await supabase.from('jobs').update({ content: updatedJob }).eq('id', job.id);
+    if (error) throw error;
+
+    void logActivity({
+        eventType: 'job_updated',
+        source: 'dbService',
+        purpose: 'candidate_note_saved',
+        entityType: 'job',
+        entityId: job.id,
+        entityLabel: updatedJob.title || job.id,
+        summary: `Saved private notes for a candidate on "${updatedJob.title || 'Untitled posting'}".`,
+        metadata: {
+            candidate_id: candidateId,
+            tag_count: trimmedTags.length,
+            note_length: trimmedNote.length,
+        },
+    });
+
+    return updatedJob;
+};
+
+export const removeCandidateInterestReview = async (
+    job: JobProfile,
+    candidateId: string,
+): Promise<JobProfile> => {
+    const updatedReviews = { ...(job.candidate_interest_reviews ?? {}) };
+    delete updatedReviews[candidateId];
+
+    const updatedJob: JobProfile = {
+        ...job,
+        candidate_interest_reviews: updatedReviews,
+    };
+
+    const { error } = await supabase.from('jobs').update({ content: updatedJob }).eq('id', job.id);
+    if (error) throw error;
+
+    void logActivity({
+        eventType: 'job_updated',
+        source: 'dbService',
+        purpose: 'candidate_interest_review_removed',
+        entityType: 'job',
+        entityId: job.id,
+        entityLabel: updatedJob.title || job.id,
+        summary: `Removed candidate review for "${updatedJob.title || 'Untitled posting'}".`,
+        metadata: {
+            candidate_id: candidateId,
+        },
+    });
+
+    return updatedJob;
+};
+
+const notifyRejectedApplicantsForArchivedJob = async (job: JobProfile): Promise<void> => {
+    try {
+        const applicants = await getApplicantsForJob(job.id, job.applicant_emails || []);
+        const hiredCandidateId = job.hired_candidate_id || null;
+        const rejectedApplicants = applicants.filter(({ candidate }) => candidate.id !== hiredCandidateId);
+        await Promise.all(rejectedApplicants.map(({ candidate }) => createNotification({
+            user_id: candidate.id,
+            type: 'info',
+            title: 'Selezione conclusa',
+            message: `Il processo di selezione per "${job.title}" si e concluso. Non sei stato selezionato per questa posizione.`,
+            metadata: {
+                job_id: job.id,
+                candidate_id: candidate.id,
+            },
+        })));
+    } catch (error) {
+        console.warn(`Could not notify rejected applicants for archived job ${job.id}:`, error);
+    }
+};
+
+export const archiveRecruiterJobPosting = async (job: JobProfile, hiredCandidateId?: string | null): Promise<JobProfile> => {
+    const actor = await resolveEffectiveActor();
+    const normalizedHiredCandidateId = hiredCandidateId || job.hired_candidate_id || null;
+    const updatedJob: JobProfile = {
+        ...job,
+        is_archived: true,
+        archived_at: new Date().toISOString(),
+        archived_reason: 'hiring_completed',
+        archived_by: actor.profileId || null,
+        hired_candidate_id: normalizedHiredCandidateId,
+        hired_candidate_selected_at: normalizedHiredCandidateId ? new Date().toISOString() : null,
+        visible_to_seekers: false,
+    };
+
+    const { error } = await supabase.from('jobs').update({ content: updatedJob }).eq('id', job.id);
+    if (error) throw error;
+
+    void notifyRejectedApplicantsForArchivedJob(updatedJob);
+    void logActivity({
+        eventType: 'job_updated',
+        source: 'dbService',
+        purpose: 'job_archived_hiring_completed',
+        entityType: 'job',
+        entityId: job.id,
+        entityLabel: updatedJob.title || job.id,
+        summary: `Archived job posting "${updatedJob.title || 'Untitled posting'}" as hiring completed.`,
+        metadata: {
+            recruiter_id: updatedJob.recruiter_id || actor.profileId || null,
+            archived_reason: updatedJob.archived_reason,
+            hired_candidate_id: updatedJob.hired_candidate_id || null,
+        },
+    });
+
+    return updatedJob;
+};
+
+export const saveJobHiredCandidate = async (job: JobProfile, candidateId: string | null): Promise<JobProfile> => {
+    const updatedJob: JobProfile = {
+        ...job,
+        hired_candidate_id: candidateId,
+        hired_candidate_selected_at: candidateId ? new Date().toISOString() : null,
+    };
+
+    const { error } = await supabase.from('jobs').update({ content: updatedJob }).eq('id', job.id);
+    if (error) throw error;
+
+    void logActivity({
+        eventType: 'job_updated',
+        source: 'dbService',
+        purpose: candidateId ? 'job_hired_candidate_selected' : 'job_hired_candidate_cleared',
+        entityType: 'job',
+        entityId: job.id,
+        entityLabel: updatedJob.title || job.id,
+        summary: candidateId
+            ? `Selected hired candidate for "${updatedJob.title || 'Untitled posting'}".`
+            : `Cleared hired candidate for "${updatedJob.title || 'Untitled posting'}".`,
+        metadata: {
+            recruiter_id: updatedJob.recruiter_id || null,
+            candidate_id: candidateId,
+        },
+    });
+
+    return updatedJob;
+};
+
+export const restoreRecruiterJobPosting = async (job: JobProfile): Promise<JobProfile> => {
+    const { archived_at: _archivedAt, archived_reason: _archivedReason, archived_by: _archivedBy, ...activeJob } = job;
+    const updatedJob: JobProfile = {
+        ...activeJob,
+        is_archived: false,
+        visible_to_seekers: true,
+    };
+
+    const { error } = await supabase.from('jobs').update({ content: updatedJob }).eq('id', job.id);
+    if (error) throw error;
+
+    void logActivity({
+        eventType: 'job_updated',
+        source: 'dbService',
+        purpose: 'job_restored_from_archive',
+        entityType: 'job',
+        entityId: job.id,
+        entityLabel: updatedJob.title || job.id,
+        summary: `Restored job posting "${updatedJob.title || 'Untitled posting'}" from archive.`,
+        metadata: {
+            recruiter_id: updatedJob.recruiter_id || null,
+        },
+    });
+
+    return updatedJob;
+};
+
 export const getAllJobs = async (): Promise<JobProfile[]> => {
     const { data, error } = await supabase.from('jobs').select('*');
     if (!error && data && data.length > 0) {
-        const jobs = data.map(d => hydrateEmbedding(d.content as JobProfile, d.embedding));
+        const jobs = data.map(d => normalizeJobQuestionnaireState(hydrateEmbedding(d.content as JobProfile, d.embedding)));
         return filterJobsForCurrentViewer(await enrichJobsWithApplicantEmails(jobs));
     }
 
     if (loadAdminImpersonation()) {
         const { data: rpcData, error: rpcError } = await supabase.rpc('get_debug_data');
         if (!rpcError) {
-            return filterJobsForCurrentViewer((((rpcData as any)?.jobs || []) as any[]).map((row) => row.content as JobProfile));
+            return filterJobsForCurrentViewer((((rpcData as any)?.jobs || []) as any[]).map((row) => normalizeJobQuestionnaireState(row.content as JobProfile)));
         }
     }
 
@@ -1299,7 +1809,7 @@ export const getAllJobs = async (): Promise<JobProfile[]> => {
 export const getJobById = async (jobId: string): Promise<JobProfile | undefined> => {
     const { data, error } = await supabase.from('jobs').select('*').eq('id', jobId).single();
     if (!error && data) {
-        const [job] = await enrichJobsWithApplicantEmails([hydrateEmbedding(data.content as JobProfile, data.embedding)]);
+        const [job] = await enrichJobsWithApplicantEmails([normalizeJobQuestionnaireState(hydrateEmbedding(data.content as JobProfile, data.embedding))]);
         const [visibleJob] = await filterJobsForCurrentViewer([job]);
         return visibleJob;
     }
@@ -1313,7 +1823,7 @@ export const getJobById = async (jobId: string): Promise<JobProfile | undefined>
         if (!rpcError) {
             const match = (((rpcData as any)?.jobs || []) as any[]).find((row) => row?.content?.id === jobId);
             if (match?.content) {
-                const [visibleJob] = await filterJobsForCurrentViewer([match.content as JobProfile]);
+                const [visibleJob] = await filterJobsForCurrentViewer([normalizeJobQuestionnaireState(match.content as JobProfile)]);
                 return visibleJob;
             }
         }
@@ -1325,7 +1835,7 @@ export const getJobById = async (jobId: string): Promise<JobProfile | undefined>
 export const getJobsForRecruiter = async (recruiterId: string): Promise<JobProfile[]> => {
     const { data, error } = await supabase.from('jobs').select('*').eq('recruiter_id', recruiterId);
     if (!error && data && data.length > 0) {
-        const jobs = data.map((d: any) => hydrateEmbedding(d.content as JobProfile, d.embedding));
+        const jobs = data.map((d: any) => normalizeJobQuestionnaireState(hydrateEmbedding(d.content as JobProfile, d.embedding)));
         return enrichJobsWithApplicantEmails(jobs);
     }
 
@@ -1333,7 +1843,7 @@ export const getJobsForRecruiter = async (recruiterId: string): Promise<JobProfi
         const { data: rpcData, error: rpcError } = await supabase.rpc('get_debug_data');
         if (!rpcError) {
             const rows = (((rpcData as any)?.jobs || []) as any[]).filter((row) => row.recruiter_id === recruiterId);
-            return rows.map((row) => row.content as JobProfile);
+            return rows.map((row) => normalizeJobQuestionnaireState(row.content as JobProfile));
         }
     }
 
@@ -1475,7 +1985,7 @@ export const getJobsForCandidate = async (email: string, candidateProfileId?: st
         return applyLocalFilter(applySeekerVisibilityFilter(await mergeWithLocalAppliedJobs(allJobs.filter((job) => jobIds.includes(job.id) || job.applicant_emails?.some((entry) => entry.toLowerCase() === normalizedEmail)))));
     }
 
-    const hydratedJobs = jobs.map(d => hydrateEmbedding(d.content as JobProfile, d.embedding));
+    const hydratedJobs = jobs.map(d => normalizeJobQuestionnaireState(hydrateEmbedding(d.content as JobProfile, d.embedding)));
     return applyLocalFilter(applySeekerVisibilityFilter(await mergeWithLocalAppliedJobs(await enrichJobsWithApplicantEmails(hydratedJobs))));
 };
 
@@ -1794,6 +2304,10 @@ export const requestCandidateAssessment = async (
     job: JobProfile,
     candidate: CandidateProfile
 ): Promise<CandidateAssessmentRequestResult> => {
+    if (!isJobQuizEnabled(job) && job.requires_quiz === false) {
+        throw new Error('The questionnaire is currently disabled for this role.');
+    }
+
     const candidateProfileId = await resolveCandidateApplicationProfileId(candidate.contacts.email, candidate.id);
 
     if (!candidateProfileId) {
@@ -1801,16 +2315,14 @@ export const requestCandidateAssessment = async (
     }
 
     const updatedJob = await ensureJobTechnicalTest(job);
-    const alreadyCompleted = Boolean(
-        candidate.test_results?.some((result) => result.job_id === updatedJob.id && result.completed_at)
-    );
+    const alreadyCompleted = Boolean(getCurrentQuizResult(candidate, updatedJob));
 
     let emailDeliveryError: string | null = null;
 
     if (alreadyCompleted) {
-        await updateCandidateApplicationStatus(candidateProfileId, updatedJob.id, 'assessment_completed');
+        await updateApplicationStatus(candidateProfileId, updatedJob.id, 'assessment_completed');
     } else {
-        await updateCandidateApplicationStatus(candidateProfileId, updatedJob.id, 'assessment_requested');
+        await updateApplicationStatus(candidateProfileId, updatedJob.id, 'assessment_requested');
 
         const actor = await resolveEffectiveActor();
         await createNotification({
@@ -1831,7 +2343,7 @@ export const requestCandidateAssessment = async (
         });
 
         try {
-            await sendRecruiterInviteEmail({
+            const emailDispatch = await sendRecruiterInviteEmail({
                 invitationType: 'assessment',
                 candidateEmail: candidate.contacts.email,
                 candidateName: formatCandidateName(candidate) || candidate.contacts.email,
@@ -1843,6 +2355,10 @@ export const requestCandidateAssessment = async (
                 requiresAiRefinement: !candidate.ai_refined,
                 jobUrl: buildSeekerJobUrl(updatedJob.id),
             });
+
+            if (emailDispatch.status === 'paused') {
+                emailDeliveryError = EMAIL_SENDING_PAUSED_MESSAGE;
+            }
         } catch (error: any) {
             console.error('Failed to send recruiter questionnaire invite email:', error);
             emailDeliveryError = error?.message || 'Questionnaire invite email delivery failed.';
@@ -1884,7 +2400,7 @@ export const requestCandidateAiRefinement = async (
     let emailDeliveryError: string | null = null;
 
     try {
-        await sendRecruiterInviteEmail({
+        const emailDispatch = await sendRecruiterInviteEmail({
             invitationType: 'ai_refinement',
             candidateEmail: candidate.contacts.email,
             candidateName: formatCandidateName(candidate) || candidate.contacts.email,
@@ -1895,6 +2411,10 @@ export const requestCandidateAiRefinement = async (
             requiresAiRefinement: true,
             jobUrl: buildSeekerJobUrl(job.id),
         });
+
+        if (emailDispatch.status === 'paused') {
+            emailDeliveryError = EMAIL_SENDING_PAUSED_MESSAGE;
+        }
     } catch (error: any) {
         console.error('Failed to send recruiter AI refinement invite email:', error);
         emailDeliveryError = error?.message || 'AI refinement invite email delivery failed.';
@@ -1913,7 +2433,7 @@ export const markCandidateAssessmentCompleted = async (
         throw new Error('The candidate profile could not be resolved while closing the assessment.');
     }
 
-    await updateCandidateApplicationStatus(candidateProfileId, jobId, 'assessment_completed');
+    await updateApplicationStatus(candidateProfileId, jobId, 'assessment_completed');
     await notifyRecruiterOfAssessmentCompletion(candidate, jobId);
 };
 
@@ -1969,6 +2489,41 @@ export const applyToJob = async (candidateId: string, jobId: string): Promise<vo
     rememberLocallyAppliedJob([candidateId], jobId, actor.email);
     clearLocallyUnappliedJob([candidateId], jobId, actor.email);
     await notifyRecruiterOfApplication(candidateId, jobId);
+};
+
+export const isEmailInvitedToJob = async (jobId: string, email: string): Promise<boolean> => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail) return false;
+
+    const [{ data: profile }, { data: invitation }, { data: jobRow }] = await Promise.all([
+        supabase.from('profiles').select('id').eq('email', normalizedEmail).maybeSingle(),
+        supabase.from('job_invitations').select('id').eq('job_id', jobId).eq('email', normalizedEmail).maybeSingle(),
+        supabase.from('jobs').select('content').eq('id', jobId).maybeSingle(),
+    ]);
+
+    if (invitation) {
+        return true;
+    }
+
+    const invitedEmails = ((jobRow?.content as JobProfile | undefined)?.applicant_emails || [])
+        .map((entry) => entry.trim().toLowerCase());
+
+    if (invitedEmails.includes(normalizedEmail)) {
+        return true;
+    }
+
+    if (!profile?.id) {
+        return false;
+    }
+
+    const { data: application } = await supabase
+        .from('applications')
+        .select('id')
+        .eq('job_id', jobId)
+        .eq('candidate_id', profile.id)
+        .maybeSingle();
+
+    return Boolean(application);
 };
 
 export const unapplyFromJob = async (candidateId: string, jobId: string): Promise<void> => {
@@ -2100,9 +2655,94 @@ export const getApplicantsForJob = async (jobId: string, applicantEmails: string
     });
 };
 
+/**
+ * Batch variant of `getApplicantsForJob` that loads applicant data for many jobs
+ * with only two Supabase round-trips (one for applications, one for candidates)
+ * instead of `N * 2`. Designed for the recruiter dashboard where we need a quick
+ * applicant count + metrics across all the recruiter's job postings.
+ *
+ * Falls back to per-job sequential calls if the impersonation path is active, so
+ * the admin RPC + debug paths in `getApplicantsForJob` stay authoritative.
+ */
+export const getApplicantsForJobs = async (
+    jobIds: string[]
+): Promise<Record<string, { candidate: CandidateProfile; status: string }[]>> => {
+    const result: Record<string, { candidate: CandidateProfile; status: string }[]> = {};
+    if (!jobIds || jobIds.length === 0) return result;
+
+    const impersonation = loadAdminImpersonation();
+    if (impersonation?.role === 'recruiter') {
+        // Per-job path keeps the admin-RPC + debug fallbacks intact.
+        await Promise.all(jobIds.map(async (jobId) => {
+            try {
+                result[jobId] = await getApplicantsForJob(jobId);
+            } catch (e) {
+                console.error(`Batch fallback failed for job ${jobId}:`, e);
+                result[jobId] = [];
+            }
+        }));
+        return result;
+    }
+
+    // 1. All applications for all requested jobs in one query.
+    const { data: applications, error: appErr } = await supabase
+        .from('applications')
+        .select('job_id, candidate_id, status')
+        .in('job_id', jobIds);
+
+    if (appErr) {
+        console.error('Error fetching batched applications:', appErr);
+        jobIds.forEach((id) => { result[id] = []; });
+        return result;
+    }
+
+    const apps = applications || [];
+    const candidateIds = Array.from(new Set(apps.map((a) => a.candidate_id).filter(Boolean)));
+
+    // 2. All candidate profiles + embeddings in a single query.
+    let candidateRows: any[] = [];
+    if (candidateIds.length > 0) {
+        const { data, error: candErr } = await supabase
+            .from('candidates')
+            .select('user_id, content, embedding')
+            .in('user_id', candidateIds);
+        if (candErr) {
+            console.error('Error fetching batched candidates:', candErr);
+        } else {
+            candidateRows = data || [];
+        }
+    }
+
+    const candidateByUserId = new Map<string, { candidate: CandidateProfile }>();
+    for (const row of candidateRows) {
+        candidateByUserId.set(row.user_id, {
+            candidate: hydrateEmbedding(row.content as CandidateProfile, row.embedding),
+        });
+    }
+
+    // 3. Group applications back per job.
+    for (const jobId of jobIds) result[jobId] = [];
+    for (const app of apps) {
+        if (!app.candidate_id) continue;
+        const hit = candidateByUserId.get(app.candidate_id);
+        if (!hit) continue;
+        result[app.job_id].push({ candidate: hit.candidate, status: app.status || 'pending' });
+    }
+
+    return result;
+};
+
 // --- Update inviteApplicantsToJob to trigger notification ---
 export const inviteApplicantsToJob = async (jobId: string, emails: string[]): Promise<void> => {
     if (!emails || emails.length === 0) return;
+    const normalizedEmails = Array.from(
+        new Set(
+            emails
+                .map((email) => email.trim().toLowerCase())
+                .filter((email) => email.includes('@'))
+        )
+    );
+    if (normalizedEmails.length === 0) return;
 
     // Get current recruiter info for notification. Actor is serial because the later
     // queries depend on `actor.profileId`; after that the three independent reads
@@ -2112,7 +2752,7 @@ export const inviteApplicantsToJob = async (jobId: string, emails: string[]): Pr
     const [recruiterResult, jobResult, profilesResult] = await Promise.all([
         supabase.from('profiles').select('full_name').eq('id', actor.profileId).single(),
         supabase.from('jobs').select('content').eq('id', jobId).single(),
-        supabase.from('profiles').select('id, email').in('email', emails),
+        supabase.from('profiles').select('id, email').in('email', normalizedEmails),
     ]);
     const { data: recruiter } = recruiterResult;
     const { data: job } = jobResult;
@@ -2120,7 +2760,7 @@ export const inviteApplicantsToJob = async (jobId: string, emails: string[]): Pr
 
     if (profileErr) throw profileErr;
 
-    const existingEmails = profiles?.map(p => p.email) || [];
+    const existingEmailSet = new Set((profiles || []).map((profile) => profile.email.trim().toLowerCase()));
 
     // 2. Insert into applications table for existing users
     if (profiles && profiles.length > 0) {
@@ -2164,9 +2804,21 @@ export const inviteApplicantsToJob = async (jobId: string, emails: string[]): Pr
     }
 
     // 3. Handle non-existing users
-    const missingEmails = emails.filter(e => !existingEmails.includes(e));
+    const missingEmails = normalizedEmails.filter(e => !existingEmailSet.has(e));
     if (missingEmails.length > 0) {
-        const inviteInserts = missingEmails.map(e => ({
+        const { data: existingInvitations } = await supabase
+            .from('job_invitations')
+            .select('email')
+            .eq('job_id', jobId)
+            .in('email', missingEmails);
+
+        const alreadyInvited = new Set((existingInvitations || []).map((entry) => entry.email.trim().toLowerCase()));
+        const freshEmails = missingEmails.filter((email) => !alreadyInvited.has(email));
+        if (freshEmails.length === 0) {
+            return;
+        }
+
+        const inviteInserts = freshEmails.map(e => ({
             job_id: jobId,
             email: e,
             status: 'pending'
@@ -2254,6 +2906,21 @@ export const addRecruiter = async (recruiter: RecruiterProfile): Promise<any> =>
     }
 
     await syncRecruiterBrandingAcrossJobs(recruiterId, nextRecruiter);
+
+    void logActivity({
+        eventType: 'recruiter_profile_saved',
+        source: 'dbService',
+        purpose: 'recruiter_profile_save',
+        entityType: 'recruiter',
+        entityId: recruiterId,
+        entityLabel: nextRecruiter.company_name || `${nextRecruiter.first_name} ${nextRecruiter.last_name}`.trim() || recruiterId,
+        summary: `Saved recruiter profile for ${nextRecruiter.company_name || nextRecruiter.email || 'recruiter'}.`,
+        metadata: {
+            email: nextRecruiter.email || null,
+            recruiter_role: nextRecruiter.role || null,
+            company_name: nextRecruiter.company_name || null,
+        },
+    });
     return recruiterId;
 };
 

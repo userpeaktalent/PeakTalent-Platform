@@ -48,9 +48,9 @@ export const recommendJobsForCandidate = async (candidate: CandidateProfile, all
     return postWorkerMessage('recommendJobs', { candidate, jobs: allJobs, limit });
   }
 
-  if (candidate.embedding_vector) {
+  if (candidate.embedding_vector && candidate.matching_consent !== false) {
     try {
-      // 1. Attempt Server-Side Vector Match (no hard country filter — let 6-pillar constraint scoring handle location)
+      // 1. Attempt Server-Side Vector Match (no hard country filter — let weighted constraint scoring handle location)
       const { data: rpcMatches, error } = await supabase.rpc('match_jobs', {
         query_embedding: candidate.embedding_vector,
         match_threshold: 0.35, // Wider net so structured scoring can still surface excellent matches
@@ -78,7 +78,7 @@ export const recommendJobsForCandidate = async (candidate: CandidateProfile, all
           });
           return jobs
             .map(job => {
-              const scoreDetails = calculateMatchScore(job, candidate); // Full 6-pillar score
+              const scoreDetails = calculateMatchScore(job, candidate); // Full weighted ranking score
               return {
                 job,
                 score: scoreDetails.finalScore,
@@ -100,4 +100,4 @@ export const recommendJobsForCandidate = async (candidate: CandidateProfile, all
   return postWorkerMessage('recommendJobs', { candidate, jobs: allJobs, limit });
 };
 
-export { isEligible, calculateMatchScore } from '../utils/matchingUtils';
+export { DEFAULT_MATCHING_PILLAR_WEIGHTS, isEligible, calculateMatchScore, normalizeMatchingPillarWeights } from '../utils/matchingUtils';

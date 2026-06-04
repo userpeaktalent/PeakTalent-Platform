@@ -5,6 +5,7 @@ import { getAllJobs, getJobsForCandidate } from '../services/dbService';
 import { Spinner } from './common';
 import { useLanguage } from './LanguageProvider';
 import CompanyLogo from './CompanyLogo';
+import { withRetry } from '../utils/retry';
 
 interface JobBoardPageProps {
     candidate: CandidateProfile;
@@ -66,6 +67,7 @@ const JobBoardCard: React.FC<{
                         companyName={job.company_name}
                         size="sm"
                         className="shrink-0"
+                        fullBleed
                     />
                     <div className="min-w-0">
                         <h3 className="text-lg font-black text-slate-800 dark:text-slate-100 group-hover:text-orange-500 transition-colors mb-1 line-clamp-2">
@@ -124,7 +126,7 @@ const JobBoardCard: React.FC<{
                 {/* CTA */}
                 <button
                     onClick={() => onView(job)}
-                    className={`w-full font-bold py-3 px-4 rounded-xl shadow-md hover:shadow-lg transition-all text-sm active:scale-[0.98] ${isApplied
+                    className={`w-full font-bold py-3 px-4 rounded-xl shadow-md hover:shadow-lg transition-all text-sm ${isApplied
                         ? 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-600 hover:bg-slate-200 dark:hover:bg-slate-600'
                         : 'bg-slate-900 dark:bg-slate-700 text-white hover:bg-orange-500 dark:hover:bg-orange-600'
                         }`}
@@ -170,10 +172,16 @@ const JobBoardPage: React.FC<JobBoardPageProps> = ({ candidate, onBack, onViewJo
         const loadData = async () => {
             setIsLoading(true);
             try {
-                const [jobs, appliedJobs] = await Promise.all([
+                const [jobs, appliedJobs] = await withRetry(() => Promise.all([
                     getAllJobs(),
                     getJobsForCandidate(candidate.contacts.email, candidate.id)
-                ]);
+                ]), {
+                    attempts: 3,
+                    delaysMs: [0, 900, 2200],
+                    onRetry: (error, attempt) => {
+                        console.warn(`Retrying job board load for ${candidate.id} after failed attempt ${attempt}:`, error);
+                    },
+                });
                 setAllJobs(jobs);
                 setAppliedJobIds(new Set(appliedJobs.map(j => j.id)));
             } catch (e) {
@@ -229,7 +237,7 @@ const JobBoardPage: React.FC<JobBoardPageProps> = ({ candidate, onBack, onViewJo
                     onClick={onBack}
                     className="mb-4 text-sm text-slate-500 hover:text-orange-600 dark:text-slate-400 transition-colors flex items-center gap-2 group"
                 >
-                    <span className="transform group-hover:-translate-x-1 transition-transform"><BackIcon /></span>
+                    <span className="transform transition-transform"><BackIcon /></span>
                     {text('Back', 'Indietro')}
                 </button>
                 <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4">

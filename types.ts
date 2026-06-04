@@ -26,6 +26,9 @@ export interface RecruiterProfile {
     address: string;
   };
   sector: string[]; // e.g., ["Technology", "Finance"]
+  ranking_weights?: Partial<MatchingPillarWeights>;
+  ranking_universities?: PrestigeListOverride | null;
+  ranking_companies?: PrestigeListOverride | null;
 }
 
 export interface Skill {
@@ -95,6 +98,8 @@ export interface Education {
   to: string; // YYYY-MM or 'present'
   currently_pursuing: boolean;
   description?: string;
+  description_it?: string;
+  description_en?: string;
 }
 
 export interface Experience {
@@ -108,6 +113,8 @@ export interface Experience {
   to: string; // YYYY-MM or 'present'
   is_current_position: boolean;
   description?: string;
+  description_it?: string;
+  description_en?: string;
 }
 
 export interface JobConstraints {
@@ -122,6 +129,20 @@ export interface JobConstraints {
   visa_sponsorship?: boolean;
   relocation_support?: boolean;
   min_education_level?: string; // e.g. 'BSc', 'MSc' — used as hard filter
+}
+
+export interface MatchingPillarWeights {
+  semantic: number;
+  hard: number;
+  industry: number;
+  education: number;
+  careerPrestige: number;
+}
+
+export interface PrestigeListOverride {
+  tier1?: string[];
+  tier2?: string[];
+  tier3?: string[];
 }
 
 
@@ -144,6 +165,12 @@ export interface JobProfile extends EmbeddingMetadata {
   industry: string[];
   company_name?: string;
   visible_to_seekers?: boolean;
+  is_archived?: boolean;
+  archived_at?: string;
+  archived_reason?: string;
+  archived_by?: string | null;
+  hired_candidate_id?: string | null;
+  hired_candidate_selected_at?: string | null;
   company_logo_url?: string;
   company_logo_path?: string;
   recruiter_id?: string | null;
@@ -160,7 +187,19 @@ export interface JobProfile extends EmbeddingMetadata {
   applicant_emails?: string[];
   auto_filter_enabled?: boolean;
   technical_test?: TechnicalTest;
-  score_overrides?: Record<string, { score: number; reason?: string; overridden_at: string }>;
+  requires_quiz?: boolean;
+  ranking_weights?: Partial<MatchingPillarWeights>;
+  ranking_universities?: PrestigeListOverride | null;
+  ranking_companies?: PrestigeListOverride | null;
+  score_overrides?: Record<string, { score: number; previous_score?: number; reason: string; overridden_at: string }>;
+  candidate_interest_reviews?: Record<string, { decision: 'interested' | 'not_interested'; updated_at: string }>;
+  candidate_notes?: Record<string, CandidateNote>;
+}
+
+export interface CandidateNote {
+  tags: string[];
+  note: string;
+  updated_at: string;
 }
 
 export interface EvaluationStep {
@@ -186,9 +225,11 @@ export interface TestResult {
   job_id: string;
   score?: number;
   completed_at?: string;
+  questionnaire_generated_at?: string;
   questionnaire_title?: string;
   question_count?: number;
   answers?: QuestionnaireAnswer[];
+  tab_switch_count?: number;
 }
 
 export interface CandidateRefinementChat {
@@ -238,7 +279,6 @@ export interface CandidateProfile extends EmbeddingMetadata {
   personal_info: {
     first_name: string;
     last_name: string;
-    pronoun?: string;
   };
   residence: {
     country: string;
@@ -258,6 +298,8 @@ export interface CandidateProfile extends EmbeddingMetadata {
   job_search_status?: string;
   profile_visibility?: 'visible' | 'private';
   terms_and_conditions_accepted?: boolean;
+  matching_consent?: boolean;
+  must_change_password?: boolean;
 
   skills: CandidateSkill[];
   it_skills: CandidateSkill[];
@@ -268,6 +310,8 @@ export interface CandidateProfile extends EmbeddingMetadata {
   preferences: CandidatePreferences;
 
   summary_text: string;
+  summary_text_it?: string;
+  summary_text_en?: string;
   canonical_career_text?: string;
   experiences: Experience[];
   education: Education[];
@@ -275,6 +319,7 @@ export interface CandidateProfile extends EmbeddingMetadata {
   // AI refinement tracking
   ai_refined?: boolean;
   ai_refined_at?: string;
+  last_refinement_chat_backup?: { transcript: ChatMessage[]; completed_at: string; archived_at: string } | null;
 
   // Test results for applications
   test_results?: TestResult[];
@@ -297,6 +342,8 @@ export interface MatchScoreBreakdown {
   constraintScore: number;
   educationScore: number;
   careerPrestigeScore: number;
+  weights: MatchingPillarWeights;
+  algorithm_version: string;
 }
 
 export interface RecommendedJob {

@@ -1,7 +1,30 @@
+const fs = require('fs');
+const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-const genAI = new GoogleGenerativeAI('AIzaSyDS9GBKbZMvEnUTWtjQT7fCDiSatdoDY6U');
+const loadEnvLocalValue = (key) => {
+    try {
+        const envPath = path.join(__dirname, '..', '.env.local');
+        const envContent = fs.readFileSync(envPath, 'utf8');
+        const match = envContent.match(new RegExp(`^${key}=(.*)$`, 'm'));
+        return match ? match[1].trim() : '';
+    } catch {
+        return '';
+    }
+};
+
+const geminiApiKey =
+    process.env.GEMINI_API_KEY ||
+    process.env.VITE_GEMINI_API_KEY ||
+    loadEnvLocalValue('VITE_GEMINI_API_KEY') ||
+    loadEnvLocalValue('GEMINI_API_KEY');
+
+if (!geminiApiKey) {
+    throw new Error('Missing Gemini API key. Set VITE_GEMINI_API_KEY or GEMINI_API_KEY before running this script.');
+}
+
+const genAI = new GoogleGenerativeAI(geminiApiKey);
 const model = genAI.getGenerativeModel({ model: 'models/gemini-embedding-001' });
 
 const supabase = createClient('https://xcqzhoietkrlwcczgjiu.supabase.co', 'sb_publishable_Kg3qg9gHBlqx0EPJodHMVg_kVtjA6wK');

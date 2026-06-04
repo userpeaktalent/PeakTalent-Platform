@@ -1,4 +1,5 @@
 import { CandidateProfile, RecruiterProfile } from '../types';
+import { normalizeEducationEntries } from './education';
 
 const normalizeWhitespace = (value?: string | null) =>
     (value || '').trim().replace(/\s+/g, ' ');
@@ -43,6 +44,7 @@ export const normalizeCandidateProfileNames = (candidate: CandidateProfile): Can
         first_name: normalizePersonNamePart(candidate.personal_info?.first_name),
         last_name: normalizePersonNamePart(candidate.personal_info?.last_name),
     },
+    education: normalizeEducationEntries(candidate.education),
 });
 
 export const normalizeRecruiterProfileNames = (recruiter: RecruiterProfile): RecruiterProfile => ({

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from './AuthProvider';
 import { useLanguage } from './LanguageProvider';
+import { supabase } from '../services/supabaseClient';
 
 const UserIcon = () => (
     <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -38,10 +39,12 @@ const LanguageToggle = ({
     language,
     setLanguage,
     variant = 'header',
+    onSelect,
 }: {
     language: 'it' | 'en';
     setLanguage: (language: 'it' | 'en') => void;
     variant?: 'header' | 'menu';
+    onSelect?: () => void;
 }) => (
     <div className={`flex items-center rounded-full border p-1 shadow-sm ${
         variant === 'menu'
@@ -49,7 +52,12 @@ const LanguageToggle = ({
             : 'border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800'
     }`}>
         <button
-            onClick={() => setLanguage('it')}
+            type="button"
+            onClick={(event) => {
+                event.stopPropagation();
+                setLanguage('it');
+                onSelect?.();
+            }}
             className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-bold uppercase tracking-[0.14em] transition-colors sm:px-2.5 sm:text-xs sm:tracking-[0.18em] ${
                 language === 'it'
                     ? 'bg-slate-900 text-white dark:bg-orange-500'
@@ -61,7 +69,12 @@ const LanguageToggle = ({
             IT
         </button>
         <button
-            onClick={() => setLanguage('en')}
+            type="button"
+            onClick={(event) => {
+                event.stopPropagation();
+                setLanguage('en');
+                onSelect?.();
+            }}
             className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-bold uppercase tracking-[0.14em] transition-colors sm:px-2.5 sm:text-xs sm:tracking-[0.18em] ${
                 language === 'en'
                     ? 'bg-slate-900 text-white dark:bg-orange-500'
@@ -100,6 +113,7 @@ const Header: React.FC = () => {
         effectiveUserRole,
         effectiveDisplayName,
         effectiveEmail,
+        effectiveProfileId,
         signOut,
         impersonation,
         isImpersonating,
@@ -107,6 +121,7 @@ const Header: React.FC = () => {
     } = useAuth();
 
     const [menuOpen, setMenuOpen] = useState(false);
+    const [recruiterBranding, setRecruiterBranding] = useState<{ logoUrl?: string | null; companyName?: string | null }>({});
     const menuRef = useRef<HTMLDivElement | null>(null);
     const isOnAdminPage = location.pathname.startsWith('/admin');
     const showAdminMobileNavToggle = location.pathname === '/admin/dashboard';
@@ -117,7 +132,45 @@ const Header: React.FC = () => {
     }, [location.pathname]);
 
     useEffect(() => {
-        const handlePointerDown = (event: MouseEvent) => {
+        let isMounted = true;
+
+        const loadRecruiterBranding = async () => {
+            if (effectiveUserRole !== 'recruiter' || !effectiveProfileId) {
+                if (isMounted) setRecruiterBranding({});
+                return;
+            }
+
+            try {
+                const { data, error } = await supabase
+                    .from('recruiters')
+                    .select('content')
+                    .eq('id', effectiveProfileId)
+                    .maybeSingle();
+
+                if (error) throw error;
+
+                const content = (data?.content || {}) as { company_logo_url?: string | null; company_name?: string | null };
+                if (isMounted) {
+                    setRecruiterBranding({
+                        logoUrl: content.company_logo_url || null,
+                        companyName: content.company_name || null,
+                    });
+                }
+            } catch (error) {
+                console.error('Unable to load recruiter branding for header:', error);
+                if (isMounted) setRecruiterBranding({});
+            }
+        };
+
+        void loadRecruiterBranding();
+
+        return () => {
+            isMounted = false;
+        };
+    }, [effectiveProfileId, effectiveUserRole]);
+
+    useEffect(() => {
+        const handlePointerDown = (event: PointerEvent | MouseEvent) => {
             if (!menuRef.current?.contains(event.target as Node)) {
                 setMenuOpen(false);
             }
@@ -129,11 +182,12 @@ const Header: React.FC = () => {
             }
         };
 
-        document.addEventListener('mousedown', handlePointerDown);
+        const eventName = typeof window !== 'undefined' && 'PointerEvent' in window ? 'pointerdown' : 'mousedown';
+        document.addEventListener(eventName, handlePointerDown as EventListener);
         document.addEventListener('keydown', handleEscape);
 
         return () => {
-            document.removeEventListener('mousedown', handlePointerDown);
+            document.removeEventListener(eventName, handlePointerDown as EventListener);
             document.removeEventListener('keydown', handleEscape);
         };
     }, []);
@@ -175,18 +229,18 @@ const Header: React.FC = () => {
             items.push({
                 label: t('header.seeProfile'),
                 icon: <UserIcon />,
-                onClick: () => navigate('/seeker/settings', { state: { tab: 'profile' } }),
+                onClick: () => navigate('/seeker/settings?tab=profile'),
             });
             items.push({
                 label: t('header.settings'),
                 icon: <SettingsIcon />,
-                onClick: () => navigate('/seeker/settings'),
+                onClick: () => navigate('/seeker/settings?tab=settings'),
             });
         } else if (effectiveUserRole === 'recruiter') {
             items.push({
                 label: t('header.settings'),
                 icon: <SettingsIcon />,
-                onClick: () => navigate('/recruiter/settings', { state: { tab: 'profile' } }),
+                onClick: () => navigate('/recruiter/settings?tab=profile'),
             });
         } else if (userRole === 'admin') {
             items.push({
@@ -222,7 +276,7 @@ const Header: React.FC = () => {
                             </button>
                         )}
                         <div className="flex items-center cursor-pointer group" onClick={handleLogoClick}>
-                            <img src="/icon.svg" alt="PeakTalent Logo" className="mr-2 h-7 w-7 object-contain transition-transform duration-300 group-hover:scale-110 sm:mr-3 sm:h-8 sm:w-8" />
+                            <img src="/icon.svg" alt="PeakTalent Logo" className="mr-2 h-7 w-7 object-contain transition-transform duration-300 sm:mr-3 sm:h-8 sm:w-8" />
                             <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-slate-900 to-slate-700 sm:text-2xl dark:from-white dark:to-slate-300">
                                 PeakTalent
                             </span>
@@ -264,9 +318,20 @@ const Header: React.FC = () => {
                                     aria-expanded={menuOpen}
                                     aria-label={t('header.accountMenuAria')}
                                 >
-                                    <span className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-orange-500 to-amber-500 text-sm font-black text-white shadow-sm">
-                                        {getInitials(effectiveDisplayName || effectiveEmail)}
-                                    </span>
+                                    {effectiveUserRole === 'recruiter' && recruiterBranding.logoUrl ? (
+                                        <span className="block h-8 w-8 overflow-hidden rounded-full shadow-sm">
+                                            <img
+                                                src={recruiterBranding.logoUrl}
+                                                alt={recruiterBranding.companyName ? `${recruiterBranding.companyName} logo` : 'Company logo'}
+                                                className="h-full w-full object-fill"
+                                                loading="lazy"
+                                            />
+                                        </span>
+                                    ) : (
+                                        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-orange-500 to-amber-500 text-sm font-black text-white shadow-sm">
+                                            {getInitials(effectiveDisplayName || effectiveEmail)}
+                                        </span>
+                                    )}
                                     <span className="text-slate-500 dark:text-slate-300">
                                         <ChevronDownIcon open={menuOpen} />
                                     </span>
@@ -288,7 +353,7 @@ const Header: React.FC = () => {
                                                 <span className="font-medium">
                                                     {language === 'it' ? 'Lingua' : 'Language'}
                                                 </span>
-                                                <LanguageToggle language={language} setLanguage={setLanguage} variant="menu" />
+                                                <LanguageToggle language={language} setLanguage={setLanguage} variant="menu" onSelect={() => setMenuOpen(false)} />
                                             </div>
                                         </div>
 
@@ -324,7 +389,7 @@ const Header: React.FC = () => {
 
                                     navigate('/auth', { state: { mode: 'login' } });
                                 }}
-                                className="rounded-lg bg-orange-500 px-6 py-1.5 font-semibold text-white shadow-lg transition-all duration-200 hover:scale-105 hover:bg-orange-600 hover:shadow-xl"
+                                className="rounded-lg bg-orange-500 px-6 py-1.5 font-semibold text-white shadow-lg transition-all duration-200 hover:bg-orange-600 hover:shadow-xl"
                             >
                                 {isAuthRoute ? t('header.register') : t('header.login')}
                             </button>

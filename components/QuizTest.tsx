@@ -10,9 +10,22 @@ interface QuizTestProps {
     onComplete: (result: TestResult) => Promise<void> | void;
     onBack?: () => void;
     timeLimitSeconds?: number;
+    questionnaireGeneratedAt?: string;
 }
 
-const QuizTest: React.FC<QuizTestProps> = ({ title, jobId, questions, onComplete, onBack, timeLimitSeconds }) => {
+// Fisher-Yates shuffle with a linear-congruential seed — deterministic per session
+const seededShuffle = <T,>(arr: T[], seed: number): T[] => {
+    const result = [...arr];
+    let s = seed;
+    for (let i = result.length - 1; i > 0; i--) {
+        s = (s * 1664525 + 1013904223) & 0xffffffff;
+        const j = Math.abs(s) % (i + 1);
+        [result[i], result[j]] = [result[j], result[i]];
+    }
+    return result;
+};
+
+const QuizTest: React.FC<QuizTestProps> = ({ title, jobId, questions, onComplete, onBack, timeLimitSeconds, questionnaireGeneratedAt }) => {
     const { text, language } = useLanguage();
     const totalSeconds = Math.max(0, timeLimitSeconds ?? questions.length * 60);
     const totalMinutes = Math.max(1, Math.round(totalSeconds / 60));
@@ -24,9 +37,27 @@ const QuizTest: React.FC<QuizTestProps> = ({ title, jobId, questions, onComplete
     const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
     const [timeLeft, setTimeLeft] = useState(totalSeconds);
     const [timerVisible, setTimerVisible] = useState(true);
+    const [tabSwitchCount, setTabSwitchCount] = useState(0);
+    const [showTabWarning, setShowTabWarning] = useState(false);
     const timerRef = useRef<HTMLDivElement>(null);
     const endTimeRef = useRef<number | null>(null);
     const performSubmitRef = useRef<(skip: boolean) => Promise<boolean>>(async () => false);
+
+    // One random seed per session — stable across re-renders, different per candidate
+    const sessionSeed = useMemo(() => Math.floor(Math.random() * 2 ** 31), []);
+
+    // Shuffle question order once per session
+    const shuffledQuestions = useMemo(() => seededShuffle(questions, sessionSeed), [questions, sessionSeed]);
+
+    // Per-question option shuffle: maps shuffled display index → original correct_option_index space
+    const optionMaps = useMemo(() => {
+        return shuffledQuestions.map((q, qi) => {
+            const originalIndices = [0, 1, 2, 3].slice(0, (q.options?.length ?? 4));
+            const shuffled = seededShuffle(originalIndices, sessionSeed + qi + 1);
+            // shuffled[displayPos] = originalIndex
+            return { questionId: q.id, shuffled };
+        });
+    }, [shuffledQuestions, sessionSeed]);
 
     const formatTime = (seconds: number) => {
         const mm = Math.floor(seconds / 60);
@@ -122,6 +153,20 @@ const QuizTest: React.FC<QuizTestProps> = ({ title, jobId, questions, onComplete
         return () => observer.disconnect();
     }, [disclaimerAccepted]);
 
+    // Tab / window focus detection — log switches and warn on return
+    useEffect(() => {
+        if (!disclaimerAccepted || isSubmitting) return;
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'hidden') {
+                setTabSwitchCount(prev => prev + 1);
+            } else {
+                setShowTabWarning(true);
+            }
+        };
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+    }, [disclaimerAccepted, isSubmitting]);
+
     const performSubmit = async (skipCompletionCheck = false): Promise<boolean> => {
         if (questions.length === 0) {
             if (!skipCompletionCheck) {
@@ -143,9 +188,11 @@ const QuizTest: React.FC<QuizTestProps> = ({ title, jobId, questions, onComplete
                 job_id: jobId,
                 score,
                 completed_at: new Date().toISOString(),
+                questionnaire_generated_at: questionnaireGeneratedAt,
                 questionnaire_title: title,
                 question_count: questions.length,
                 answers: answerDetails,
+                tab_switch_count: tabSwitchCount,
             });
             return true;
         } catch (error: any) {
@@ -224,6 +271,13 @@ const QuizTest: React.FC<QuizTestProps> = ({ title, jobId, questions, onComplete
                             <li className="flex items-start gap-2">
                                 <span className="mt-0.5 shrink-0 font-bold">•</span>
                                 {text(
+                                    'Do not switch to other tabs or windows during the test. Tab changes are detected and logged for the recruiter.',
+                                    'Non passare ad altre schede o finestre durante il test. I cambi di scheda vengono rilevati e registrati per il recruiter.'
+                                )}
+                            </li>
+                            <li className="flex items-start gap-2">
+                                <span className="mt-0.5 shrink-0 font-bold">•</span>
+                                {text(
                                     'Answer all questions and submit using the button at the bottom of the page.',
                                     'Rispondi a tutte le domande e invia tramite il pulsante in fondo alla pagina.'
                                 )}
@@ -283,6 +337,32 @@ const QuizTest: React.FC<QuizTestProps> = ({ title, jobId, questions, onComplete
                                 className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-slate-50 px-5 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
                             >
                                 {text('Continue the test', 'Continua il test')}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Tab switch warning modal */}
+            {showTabWarning && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+                    <div className="mx-4 w-full max-w-md rounded-[28px] border border-rose-200 bg-white p-8 shadow-xl dark:border-rose-900/50 dark:bg-slate-950">
+                        <h3 className="text-xl font-semibold tracking-tight text-rose-700 dark:text-rose-400">
+                            {text('Tab switch detected', 'Cambio scheda rilevato')}
+                        </h3>
+                        <p className="mt-3 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+                            {text(
+                                `You have left the test page ${tabSwitchCount} time${tabSwitchCount !== 1 ? 's' : ''}. This is logged and visible to the recruiter. Please stay on this page for the remainder of the test.`,
+                                `Hai abbandonato la pagina del test ${tabSwitchCount} volt${tabSwitchCount !== 1 ? 'e' : 'a'}. Questo viene registrato ed è visibile al recruiter. Rimani su questa pagina per il resto del test.`
+                            )}
+                        </p>
+                        <div className="mt-6">
+                            <button
+                                type="button"
+                                onClick={() => setShowTabWarning(false)}
+                                className="inline-flex w-full items-center justify-center rounded-2xl bg-rose-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-rose-700"
+                            >
+                                {text('I understand — continue the test', 'Ho capito — continua il test')}
                             </button>
                         </div>
                     </div>
@@ -376,49 +456,56 @@ const QuizTest: React.FC<QuizTestProps> = ({ title, jobId, questions, onComplete
                 </div>
 
                 <div className="mt-6 space-y-5">
-                    {questions.map((question, index) => (
-                        <section
-                            key={question.id}
-                            className="rounded-[24px] border border-slate-200 bg-slate-50/70 p-5 dark:border-slate-800 dark:bg-slate-900/40"
-                        >
-                            <div className="mb-4 flex flex-wrap items-center gap-2">
-                                <span className="inline-flex rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-slate-700 shadow-sm dark:bg-slate-900 dark:text-slate-200">
-                                    {text('Question', 'Domanda')} {index + 1}
-                                </span>
-                                <span className="inline-flex rounded-full bg-orange-50 px-3 py-1 text-[11px] font-semibold text-orange-700 dark:bg-orange-950/40 dark:text-orange-300">
-                                    {text('Multiple choice', 'Risposta multipla')}
-                                </span>
-                            </div>
-                            <h3 className="text-lg font-semibold tracking-tight text-slate-900 dark:text-slate-100">
-                                {getQuestionText(question)}
-                            </h3>
-                            <div className="mt-4 grid grid-cols-1 gap-3">
-                                {getQuestionOptions(question).map((option, optionIndex) => {
-                                    const isSelected = answers[question.id] === optionIndex;
-                                    return (
-                                        <button
-                                            key={`${question.id}_${optionIndex}`}
-                                            type="button"
-                                            onClick={() => {
-                                                setAnswers((current) => ({ ...current, [question.id]: optionIndex }));
-                                                setSubmitError('');
-                                            }}
-                                            className={`rounded-2xl border px-4 py-3 text-left text-sm font-medium transition-all ${
-                                                isSelected
-                                                    ? 'border-orange-500 bg-orange-50 text-orange-700 shadow-sm dark:bg-orange-950/30 dark:text-orange-200'
-                                                    : 'border-slate-200 bg-white text-slate-700 hover:border-orange-300 hover:bg-orange-50/60 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:border-orange-700 dark:hover:bg-slate-900'
-                                            }`}
-                                        >
-                                            <span className="mr-3 inline-flex h-6 w-6 items-center justify-center rounded-full border border-current text-[11px] font-semibold">
-                                                {String.fromCharCode(65 + optionIndex)}
-                                            </span>
-                                            {option}
-                                        </button>
-                                    );
-                                })}
-                            </div>
-                        </section>
-                    ))}
+                    {shuffledQuestions.map((question, index) => {
+                        const optionMap = optionMaps[index];
+                        const localizedOptions = getQuestionOptions(question);
+                        const shuffledOptions = optionMap.shuffled.map(originalIdx => localizedOptions[originalIdx] || '');
+
+                        return (
+                            <section
+                                key={question.id}
+                                className="rounded-[24px] border border-slate-200 bg-slate-50/70 p-5 dark:border-slate-800 dark:bg-slate-900/40"
+                            >
+                                <div className="mb-4 flex flex-wrap items-center gap-2">
+                                    <span className="inline-flex rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-slate-700 shadow-sm dark:bg-slate-900 dark:text-slate-200">
+                                        {text('Question', 'Domanda')} {index + 1}
+                                    </span>
+                                    <span className="inline-flex rounded-full bg-orange-50 px-3 py-1 text-[11px] font-semibold text-orange-700 dark:bg-orange-950/40 dark:text-orange-300">
+                                        {text('Multiple choice', 'Risposta multipla')}
+                                    </span>
+                                </div>
+                                <h3 className="text-lg font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+                                    {getQuestionText(question)}
+                                </h3>
+                                <div className="mt-4 grid grid-cols-1 gap-3">
+                                    {shuffledOptions.map((option, displayIndex) => {
+                                        const originalIndex = optionMap.shuffled[displayIndex];
+                                        const isSelected = answers[question.id] === originalIndex;
+                                        return (
+                                            <button
+                                                key={`${question.id}_${displayIndex}`}
+                                                type="button"
+                                                onClick={() => {
+                                                    setAnswers(current => ({ ...current, [question.id]: originalIndex }));
+                                                    setSubmitError('');
+                                                }}
+                                                className={`rounded-2xl border px-4 py-3 text-left text-sm font-medium transition-all ${
+                                                    isSelected
+                                                        ? 'border-orange-500 bg-orange-50 text-orange-700 shadow-sm dark:bg-orange-950/30 dark:text-orange-200'
+                                                        : 'border-slate-200 bg-white text-slate-700 hover:border-orange-300 hover:bg-orange-50/60 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:border-orange-700 dark:hover:bg-slate-900'
+                                                }`}
+                                            >
+                                                <span className="mr-3 inline-flex h-6 w-6 items-center justify-center rounded-full border border-current text-[11px] font-semibold">
+                                                    {String.fromCharCode(65 + displayIndex)}
+                                                </span>
+                                                {option}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </section>
+                        );
+                    })}
                 </div>
 
                 {submitError && (

@@ -81,7 +81,8 @@ Optional environment variables for richer admin usage metrics:
 - `VITE_SUPABASE_PLAN=free|pro|team|enterprise`
 - `VITE_SUPABASE_DB_LIMIT_BYTES`
 - `VITE_SUPABASE_STORAGE_LIMIT_BYTES`
-- `VITE_SUPABASE_API_REQUEST_LIMIT`
+- `VITE_SUPABASE_API_REQUEST_LIMIT` (defaults to `500000` when omitted)
+- `VITE_AI_REQUEST_LIMIT` (defaults to `500000` when omitted)
 
 For API request tracking, deploy the `admin-supabase-usage` Edge Function and set this secret in Supabase:
 
@@ -142,3 +143,4 @@ Notes:
 - If you want the easiest third-party alternative, Resend currently lists a free tier with 3,000 emails/month and 100 emails/day, and a Pro plan at $20/month for 50,000 emails/month:
   - [Resend pricing](https://resend.com/pricing)
 
+hey hey

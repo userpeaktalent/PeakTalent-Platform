@@ -1,7 +1,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { CandidateProfile, CandidateRefinementChat, ChatMessage, Experience } from '../types';
-import { extractCvInfo, summarizeCandidateProfile } from '../services/geminiService';
+import { extractCvInfoFromFile, summarizeCandidateProfile, rankCandidateSkills } from '../services/geminiService';
 import { getSeekerSkillLevelLabel } from '../utils/skills';
 import { readFileAsText } from '../utils/fileReader';
 import { AiBanner, LoadingScreen, ProgressTracker } from './common';
@@ -9,6 +9,7 @@ import ChatWindow from './ChatWindow';
 import { addCandidate } from '../services/dbService';
 import { saveCandidateCv, saveCandidateRefinementChat, getLatestCandidateRefinementChat } from '../services/candidateAssetsService';
 import { formatCandidateName, normalizePersonNamePart } from '../utils/nameFormat';
+import { hasSubstantialChanges } from '../utils/profileChanges';
 import CandidateForm from './CandidateForm';
 import { useLanguage } from './LanguageProvider';
 
@@ -22,6 +23,7 @@ interface JobSeekerFlowProps {
 
 const stepStorageKey = (candidateId: string | undefined) =>
   candidateId ? `peaktalent:seekerFlow:step:${candidateId}` : null;
+
 
 const JobSeekerFlow: React.FC<JobSeekerFlowProps> = ({ onGoToDashboard, isEditing = false, candidate, onProfileUpdate, initialStep }) => {
   const { text, language } = useLanguage();
@@ -87,6 +89,7 @@ const JobSeekerFlow: React.FC<JobSeekerFlowProps> = ({ onGoToDashboard, isEditin
   const [finalProfile, setFinalProfile] = useState<CandidateProfile | null>(null);
   const chatHistoryRef = useRef<ChatMessage[]>([]);
   const [isChatComplete, setIsChatComplete] = useState(false);
+  const [reRefineModal, setReRefineModal] = useState<{ rankedProfile: Partial<CandidateProfile> } | null>(null);
   const [leaveAttempts, setLeaveAttempts] = useState(0);
   const [interviewClosedByNavigationGuard, setInterviewClosedByNavigationGuard] = useState(false);
   const [existingChat, setExistingChat] = useState<CandidateRefinementChat | null>(null);
@@ -219,6 +222,12 @@ const JobSeekerFlow: React.FC<JobSeekerFlowProps> = ({ onGoToDashboard, isEditin
     it_skills: updatedProfile.it_skills || [],
     soft_skills: updatedProfile.soft_skills || [],
     summary_text: updatedProfile.summary_text || '',
+    summary_text_it: updatedProfile.summary_text !== undefined && updatedProfile.summary_text !== candidate.summary_text
+      ? undefined
+      : updatedProfile.summary_text_it ?? candidate.summary_text_it,
+    summary_text_en: updatedProfile.summary_text !== undefined && updatedProfile.summary_text !== candidate.summary_text
+      ? undefined
+      : updatedProfile.summary_text_en ?? candidate.summary_text_en,
   });
 
   const flowSteps = [
@@ -243,8 +252,7 @@ const JobSeekerFlow: React.FC<JobSeekerFlowProps> = ({ onGoToDashboard, isEditin
     setError(null);
     setAssetWarning(null);
     try {
-      const cvText = await readFileAsText(cvFile);
-      const info = await extractCvInfo(cvText);
+      const info = await extractCvInfoFromFile(cvFile);
       try {
         await saveCandidateCv(buildCandidateForSave(info), cvFile);
       } catch (storageError: any) {
@@ -267,8 +275,7 @@ const JobSeekerFlow: React.FC<JobSeekerFlowProps> = ({ onGoToDashboard, isEditin
     setSuccessMessage(null);
     setAssetWarning(null);
     try {
-      const cvText = await readFileAsText(file);
-      const info = await extractCvInfo(cvText);
+      const info = await extractCvInfoFromFile(file);
       const nextProfile = buildCandidateForSave({
         ...profileData,
         ...info,
@@ -306,24 +313,57 @@ const JobSeekerFlow: React.FC<JobSeekerFlowProps> = ({ onGoToDashboard, isEditin
   };
 
   const handleFormSubmit = async (updatedProfile: Partial<CandidateProfile>, action: 'save' | 'refine') => {
-    setProfileData(updatedProfile);
+    if (action === 'refine' && candidate.ai_refined) {
+      setError(text('You have already completed the AI interview. You can save your manual edits directly.', "Hai già completato l'intervista AI. Puoi salvare direttamente le modifiche manuali."));
+      return;
+    }
+
+    // Re-rank skills based on the finalized profile before proceeding
+    setIsLoading(true);
+    setError(null);
+    let rankedProfile = updatedProfile;
+    try {
+      const { skills, it_skills } = await rankCandidateSkills(
+        updatedProfile.skills || [],
+        updatedProfile.it_skills || [],
+        updatedProfile.experiences || [],
+      );
+      rankedProfile = { ...updatedProfile, skills, it_skills };
+    } catch (err) {
+      console.warn('Skill ranking failed, proceeding without re-ranking:', err);
+    } finally {
+      setIsLoading(false);
+    }
+
+    setProfileData(rankedProfile);
 
     if (action === 'refine') {
-      // Block re-doing the AI interview if already completed
-      if (candidate.ai_refined) {
-        setError(text('You have already completed the AI interview. You can save your manual edits directly.', 'Hai già completato l’intervista AI. Puoi salvare direttamente le modifiche manuali.'));
-        return;
+      setIsLoading(true);
+      try {
+        const profileToSave = buildCandidateForSave(rankedProfile);
+        const savedProfile = await addCandidate(profileToSave);
+        setProfileData(savedProfile);
+        onProfileUpdate(savedProfile);
+      } catch (err) {
+        console.warn('Pre-step-3 profile save failed — data only in memory:', err);
+      } finally {
+        setIsLoading(false);
       }
       setStep(3);
     } else {
-      // Manual save
+      // If substantial fields changed, ask whether to (re)do the chatbot
+      if (hasSubstantialChanges(candidate, rankedProfile)) {
+        setReRefineModal({ rankedProfile });
+        return;
+      }
+
       setIsLoading(true);
       setError(null);
       try {
-        const profile = buildCandidateForSave(updatedProfile);
-        await addCandidate(profile);
-        setFinalProfile(profile);
-        onProfileUpdate(profile);
+        const profile = buildCandidateForSave(rankedProfile);
+        const savedProfile = await addCandidate(profile);
+        setFinalProfile(savedProfile);
+        onProfileUpdate(savedProfile);
         exitFlow();
       } catch (err) {
         console.error(err);
@@ -334,14 +374,61 @@ const JobSeekerFlow: React.FC<JobSeekerFlowProps> = ({ onGoToDashboard, isEditin
     }
   };
 
+  const handleConfirmReRefine = async () => {
+    if (!reRefineModal) return;
+    setReRefineModal(null);
+    setIsLoading(true);
+    setError(null);
+    try {
+      const oldChat = await getLatestCandidateRefinementChat({ id: candidate.id, email: candidate.contacts?.email });
+      const profile = buildCandidateForSave(reRefineModal.rankedProfile);
+      profile.ai_refined = false;
+      profile.ai_refined_at = undefined;
+      profile.last_refinement_chat_backup = oldChat
+        ? { transcript: oldChat.transcript, completed_at: oldChat.completed_at ?? '', archived_at: new Date().toISOString() }
+        : null;
+      const savedProfile = await addCandidate(profile);
+      onProfileUpdate(savedProfile);
+      setProfileData(savedProfile);
+      setStep(3);
+    } catch (err) {
+      console.error(err);
+      setError(text('Failed to save profile. Please try again.', 'Salvataggio profilo non riuscito. Riprova.'));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSaveWithoutReRefine = async () => {
+    if (!reRefineModal) return;
+    setReRefineModal(null);
+    setIsLoading(true);
+    setError(null);
+    try {
+      const profile = buildCandidateForSave(reRefineModal.rankedProfile);
+      // Profile changed substantially — old AI refinement is no longer valid
+      profile.ai_refined = false;
+      profile.ai_refined_at = undefined;
+      const savedProfile = await addCandidate(profile);
+      setFinalProfile(savedProfile);
+      onProfileUpdate(savedProfile);
+      exitFlow();
+    } catch (err) {
+      console.error(err);
+      setError(text('Failed to save profile. Please try again.', 'Salvataggio profilo non riuscito. Riprova.'));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleSkipAndSave = async () => {
     setIsLoading(true);
     setError(null);
     try {
       const profile = buildCandidateForSave(profileData);
-      await addCandidate(profile);
-      setFinalProfile(profile);
-      onProfileUpdate(profile);
+      const savedProfile = await addCandidate(profile);
+      setFinalProfile(savedProfile);
+      onProfileUpdate(savedProfile);
       setStep(4);
     } catch (err) {
       console.error(err);
@@ -366,15 +453,16 @@ const JobSeekerFlow: React.FC<JobSeekerFlowProps> = ({ onGoToDashboard, isEditin
       // Mark as AI refined so interview can't be repeated
       profile.ai_refined = true;
       profile.ai_refined_at = new Date().toISOString();
-      await addCandidate(profile);
+      const savedProfile = await addCandidate(profile);
       try {
-        await saveCandidateRefinementChat(profile, chatHistoryRef.current, language);
+        await saveCandidateRefinementChat(savedProfile, chatHistoryRef.current, language);
       } catch (chatSaveError: any) {
         console.error('Failed to persist seeker AI refinement transcript:', chatSaveError);
         setAssetWarning(chatSaveError?.message || text('The profile was saved, but the AI transcript could not be stored yet.', 'Il profilo è stato salvato, ma la transcript AI non è ancora stata salvata.'));
       }
-      setFinalProfile(profile);
-      onProfileUpdate(profile);
+      setProfileData(savedProfile);
+      setFinalProfile(savedProfile);
+      onProfileUpdate(savedProfile);
       setStep(4);
     } catch (err) {
       console.error(err);
@@ -393,9 +481,23 @@ const JobSeekerFlow: React.FC<JobSeekerFlowProps> = ({ onGoToDashboard, isEditin
             <p className="text-slate-600 dark:text-slate-400 mb-6">{text("Let our AI do the heavy lifting. We'll parse your CV to build the foundation of your profile. (Use a .pdf or .txt file)", 'Lascia fare il lavoro pesante alla nostra AI. Analizzeremo il tuo CV per costruire la base del profilo. (Usa un file .pdf o .txt)')}</p>
             <div className="max-w-md mx-auto">
               <input type="file" onChange={handleFileChange} accept=".txt,.pdf,text/plain,application/pdf" className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-orange-50 file:text-orange-700 hover:file:bg-orange-100 dark:file:bg-orange-900/50 dark:file:text-orange-300 dark:hover:file:bg-orange-900" />
-              <button onClick={handleCvUpload} disabled={isLoading || !cvFile} className="mt-6 w-full bg-gradient-to-r from-orange-500 to-amber-500 text-white font-semibold py-2 px-6 rounded-lg shadow-md hover:shadow-lg hover:-translate-y-0.5 transform transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed">
-                {text('Analyze CV', 'Analizza CV')}
+              <button onClick={handleCvUpload} disabled={isLoading || !cvFile} className="mt-6 w-full bg-gradient-to-r from-orange-500 to-amber-500 text-white font-semibold py-2 px-6 rounded-lg shadow-md hover:shadow-lg transform transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed">
+                {isLoading ? text('Analyzing your CV and building your profile…', 'Analizziamo il tuo CV e prepariamo il profilo…') : text('Analyze CV', 'Analizza CV')}
               </button>
+              {isLoading && (
+                <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                  <div className="flex items-center gap-3">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" className="h-5 w-5 animate-spin text-orange-500 dark:text-orange-300" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                    </svg>
+                    <span className="font-semibold">{text("We're processing your resume. This may take a few minutes.", 'Stiamo elaborando il tuo CV. Può richiedere alcuni minuti.')}</span>
+                  </div>
+                  <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+                    {text('We extract experience, skills, roles and more before moving to the next step.', 'Estraiamo esperienza, competenze, ruoli e altro prima di passare al prossimo passo.')}
+                  </p>
+                </div>
+              )}
               {error && <p className="text-red-500 mt-4">{error}</p>}
               {assetWarning && (
                 <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-300">
@@ -474,8 +576,8 @@ const JobSeekerFlow: React.FC<JobSeekerFlowProps> = ({ onGoToDashboard, isEditin
           </div>
         );
       case 3:
-        // If AI interview was already completed, show locked state
-        if (candidate.ai_refined) {
+        // If AI interview was already completed AND not being reset for re-refinement, show locked state
+        if (candidate.ai_refined && profileData.ai_refined !== false) {
           return (
             <div className="text-center animate-fade-in py-12">
               <div className="h-16 w-16 bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400 rounded-full flex items-center justify-center mx-auto mb-6">
@@ -487,7 +589,7 @@ const JobSeekerFlow: React.FC<JobSeekerFlowProps> = ({ onGoToDashboard, isEditin
               <div className="flex flex-col items-center gap-3">
                 <button
                   onClick={exitFlow}
-                  className="bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-3 px-8 rounded-lg shadow-md hover:shadow-xl hover:-translate-y-1 transform transition-all"
+                  className="bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-3 px-8 rounded-lg shadow-md hover:shadow-xl transform transition-all"
                 >
                   {text('Go to Dashboard', 'Vai alla dashboard')}
                 </button>
@@ -511,23 +613,35 @@ const JobSeekerFlow: React.FC<JobSeekerFlowProps> = ({ onGoToDashboard, isEditin
           ...resolvedItSkills.map((s: typeof resolvedItSkills[0]) => ({ ...s, category: 'it' as const })),
         ];
 
-        // Priority formula: Importance (Rank) * Uncertainty (Confidence) * CategoryWeight
-        // ImportanceScore: 21 - rank (Rank 1 = 20, Rank 20 = 1). Assumes rank 1-20.
-        // UncertaintyMultiplier: low=1.5, medium=1.2, high=1.0
-        // CategoryWeight: technical=1.0, it=0.75 (Penalize IT tools to favor core roles)
-        const prioritizedSkills = allSkills
+        // Priority formula: Importance (Rank) * Uncertainty (Confidence) * SourceBoost * CategoryWeight
+        // rankScore: 21 - rank → rank 1 = score 20, rank 20 = score 1
+        // Priority = rankScore × categoryWeight only.
+        // Confidence and source are passed as context to the AI prompt so it knows which skills
+        // to probe more — they must NOT influence selection, because low-confidence skills are
+        // typically unimportant bare-list entries (e.g. Inventor listed once) and boosting them
+        // would promote junk IT tools above core technical skills.
+        // categoryWeight: it=0.75 normalizes the two independent rank scales so rank-1 IT
+        // never beats rank-1 technical (20×0.75=15 < 20×1.0=20).
+        const sortedSkills = allSkills
           .map(s => {
-            const importanceScore = Math.max(1, 21 - (s.rank || 20));
-            let uncertaintyMultiplier = 1.0;
-            if (s.level_confidence === 'low') uncertaintyMultiplier = 1.5;
-            else if (s.level_confidence === 'medium') uncertaintyMultiplier = 1.2;
-
-            const categoryWeight = s.category === 'it' ? 0.75 : 1.0;
-
-            return { ...s, priority: importanceScore * uncertaintyMultiplier * categoryWeight };
+            const rankScore = Math.max(1, 21 - (s.rank || 20));
+            const categoryWeight = s.category === 'it' ? 0.90 : 1.0;
+            return { ...s, priority: rankScore * categoryWeight };
           })
-          .sort((a, b) => b.priority - a.priority)
-          .slice(0, 5); // Pick top 5 based on balanced Priority
+          .sort((a, b) => b.priority - a.priority);
+
+        // Cap IT skills at 2 out of 5: iterate in priority order, include IT only until quota is full
+        const MAX_IT_IN_TARGETS = 2;
+        const prioritizedSkills: typeof sortedSkills = [];
+        let itSlots = 0;
+        for (const s of sortedSkills) {
+          if (prioritizedSkills.length >= 5) break;
+          if (s.category === 'it') {
+            if (itSlots < MAX_IT_IN_TARGETS) { prioritizedSkills.push(s); itSlots++; }
+          } else {
+            prioritizedSkills.push(s);
+          }
+        }
 
         // When no structured skills exist, derive verification targets from experiences
         const experienceDerivedTargets: string[] = [];
@@ -568,13 +682,25 @@ const JobSeekerFlow: React.FC<JobSeekerFlowProps> = ({ onGoToDashboard, isEditin
           ? 'ABSOLUTE LANGUAGE LOCK: Every single token you output must be in Italian. This rule overrides all other instructions. Never switch to English under any circumstance, regardless of what language the candidate uses or what the prompt template says.'
           : 'ABSOLUTE LANGUAGE LOCK: Every single token you output must be in English. This rule overrides all other instructions. Never switch to Italian under any circumstance, regardless of what language the candidate uses or what the prompt template says.';
 
+        // Compute explicitly which preference fields are missing so the model doesn't have to guess
+        const prefs = profileData?.preferences;
+        const missingConstraints: string[] = [];
+        if (!prefs?.salary_eur?.min) missingConstraints.push(language === 'it' ? 'aspettative salariali (RAL minima desiderata)' : 'salary expectations (minimum desired)');
+        if (!prefs?.preferred_locations?.length) missingConstraints.push(language === 'it' ? 'città/paese di preferenza lavorativa' : 'preferred work location(s)');
+        if (!prefs?.remote || prefs.remote === 'no_preference') missingConstraints.push(language === 'it' ? 'preferenza remote / ibrido / in presenza' : 'remote / hybrid / on-site preference');
+        if (!prefs?.desired_contract_types?.length) missingConstraints.push(language === 'it' ? 'tipo di contratto preferito' : 'preferred contract type');
+
+        const missingConstraintsInstruction = missingConstraints.length > 0
+          ? `MISSING PREFERENCES — these fields are empty in the profile and you MUST collect them in the wrap-up. Weave them into one natural conversational question (do not list them mechanically). Allow 1 follow-up if the answer is still incomplete, then move on:\n${missingConstraints.map((m, i) => `   ${i + 1}. ${m}`).join('\n')}`
+          : `All preference fields (salary, location, remote, contract) are already filled. Do NOT ask about them in the wrap-up.`;
+
         return (
           <div>
             <h2 className="text-2xl font-semibold text-slate-800 dark:text-slate-100 mb-4 text-center">
               {text('AI Career Refinement', 'Affinamento carriera con AI')}
             </h2>
             <p className="text-slate-600 dark:text-slate-400 mb-6 text-center">
-              {text('Our assistant will interview you to capture nuance and boost your match accuracy.', 'Il nostro assistente ti farà un’intervista per cogliere sfumature e migliorare l’accuratezza del matching.')}
+              {text('Our assistant will interview you to capture nuance and boost your match accuracy.', "Il nostro assistente ti farà un'intervista per cogliere sfumature e migliorare l'accuratezza del matching.")}
             </p>
             <div className="h-[65vh] min-h-[420px] border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden sm:h-[600px]">
               {chatInitialized ? (
@@ -593,28 +719,41 @@ ${verificationTargets}
 
 INTERVIEW STRUCTURE — follow this order strictly:
 
-1. OPENING (1 question only, no follow-up):
-   - One brief question to confirm current role and career direction. Move on immediately after the answer regardless of depth.
+1. OPENING (1–2 questions maximum):
+   - Question 1: ask the candidate to briefly describe their current role and the professional direction they want to pursue.
+   - After Q1, evaluate the answer on two dimensions:
+     (a) ROLE CLARITY: do you understand their current position and seniority?
+     (b) DIRECTION CLARITY: do you understand what they want to do more of, what to leave behind, and what kind of next step they are aiming for?
+   - If BOTH dimensions are clearly covered → skip Q2 entirely and proceed directly to section 2. Do not acknowledge the skip.
+   - If ONE dimension is missing or ambiguous → ask exactly 1 targeted clarification that addresses only the missing piece (not a generic Q2). Then proceed to section 2 regardless of the answer.
+   - If BOTH dimensions are missing or very thin → ask Question 2: what have they focused on most in the past year, and what would they like to do more (or less) of in their next role.
+   - If any answer is clearly off-topic, redirect once with a short direct sentence, then move on regardless.
+   - After the opening (whether 1 or 2 questions), mentally reorder VERIFICATION TARGETS if needed before entering section 2. Do not announce this adjustment.
 
 2. SKILL VERIFICATION — THIS IS THE CORE SECTION. DO NOT SKIP OR RUSH.
    - Work through VERIFICATION TARGETS in priority order. Dedicate one direct question to each skill — do NOT group multiple skills into a single question.
    - For each skill: ask for a concrete project, task, or real-world example that demonstrates it.
-   - If the answer is vague or insufficient, ask exactly ONE focused follow-up on that specific skill, then move to the next skill regardless.
+   - FOLLOW-UP DECISION — after each answer, apply this logic:
+     * If the answer is vague, generic, or insufficient → ask ONE broad clarifying question to surface more context (what was the project, what was their role, what was the outcome).
+     * If the answer is detailed but ONE calibration factor is genuinely unresolvable and your level estimate would shift by 2+ points depending on it → ask ONE very targeted question on that single factor. Typical cases: ownership is completely unclear (primary lead vs. support contributor) or scope is so unspecified you cannot tell if it was a prototype or a production system. Do NOT ask a follow-up just to confirm what you already understood or to gather additional detail. If you can assign a level confidently within a 1-point range, skip the follow-up.
+     * If the answer is detailed AND you can assign a level confidently → no follow-up, move directly to the next skill.
+   - One follow-up maximum per skill, regardless of outcome. Then move on.
    - Expected question count: minimum ${skillCount} (one per skill), maximum ${skillCount * 2} (one follow-up allowed per skill). Never exceed this.
    - Before moving to section 3, run a hard check: have you asked at least one direct question for each of the ${skillCount} items in VERIFICATION TARGETS? If any skill was skipped, address it now.
    - RECENCY: if the candidate's last concrete use of a skill is older than 2 years, note it internally as partially decayed.
 
-3. WRAP-UP (only after ALL skills are done — max 2 questions total):
-   - Why looking for a new opportunity now?
-   - Only ask about salary/location/contract if clearly missing from CANDIDATE DATA.
+3. WRAP-UP (only after ALL skills are done):
+   - Explore the kind of work environment and working style they are looking for — things like team dynamics, autonomy, pace, company culture, remote/hybrid. Ask this naturally and openly, without listing sub-topics. Let the candidate lead. (max 1 question, no follow-up)
+   - ${missingConstraintsInstruction}
 
 RULES:
-- Ask EXACTLY ONE question at a time. Never bundle two questions.
-- NEVER mention any numeric score, rating, or level to the candidate (no "1/10", "3/10", "base level", no fractions). If you must refer to their claimed level, use only the label: Base, Intermediate, or Expert.
+- Ask EXACTLY ONE question at a time. Never bundle two questions, except for follow-ups and section 3 (WRAP-UP) questions.
+- NEVER mention any numeric score, rating, or level to the candidate (no "1/10", "3/10", "base level", no fractions). If you must refer to their claimed level, use only the label: Base, Intermediate, or Expert (but avoid even that if possible — focus on the skill and evidence, not on the label). Do NOT ask them to self-rate or explain their level — just ask for concrete examples that demonstrate their proficiency.
 - Never say "your CV says" or reference confidence/source metadata.
-- No filler affirmations ("Great!", "Excellent!", "Perfect!"). Acknowledge neutrally and move on.
+- Do not acknowledge answers. Banned words and phrases (in any language): "Great!", "Excellent!", "Perfect!", "Interesting!", "Ottimo", "Perfetto", "Ottima risposta", "Grazie", "Capisco", "Capito", "Chiarissimo", "Certo", "Interessante", "Bene", "Ok, grazie", or any equivalent filler in any language. Go directly to the next question with zero preamble.
+- Do NOT announce which skill or topic you are moving to next. Every question must stand on its own — never say "Passando a X…", "Per quanto riguarda Y…", "Ora parliamo di…", "Moving on to…", or any similar transition phrase.
 - Do not explain why you are asking a question.
-- Do not summarize or give feedback during the interview.
+- Do not give feedback during the interview.
 
 INTERNAL SCORING (never verbalize — for profile update only):
 - Specific project + scale + ownership + trade-offs matching claimed level → keep CV level
@@ -664,9 +803,9 @@ VERIFIED_SKILLS:
               <button
                 onClick={handleProfileGeneration}
                 disabled={!isChatComplete || isLoading}
-                className="w-full max-w-md bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-3 px-6 rounded-lg shadow-md hover:shadow-xl hover:-translate-y-1 transform transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed text-lg"
+                className="w-full max-w-md bg-gradient-to-r from-orange-500 to-amber-500 text-white font-bold py-3 px-6 rounded-lg shadow-md hover:shadow-xl transform transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed text-lg"
               >
-                  {isEditing ? text('Update Profile with AI Insights', 'Aggiorna il profilo con insight AI') : text('Create AI-Powered Profile', 'Crea profilo potenziato dall’AI')}
+                  {isEditing ? text('Update Profile with AI Insights', 'Aggiorna il profilo con insight AI') : text('Create AI-Powered Profile', "Crea profilo potenziato dall'AI")}
               </button>
 
               <button
@@ -674,7 +813,7 @@ VERIFIED_SKILLS:
                 disabled={isLoading}
                 className="text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 transition-colors text-sm font-medium disabled:opacity-50"
               >
-                {text("Skip refinement and just save manual edits", "Salta l’affinamento e salva solo le modifiche manuali")}
+                {text("Skip refinement and just save manual edits", "Salta l'affinamento e salva solo le modifiche manuali")}
               </button>
 
               {!isChatComplete && (
@@ -783,7 +922,7 @@ VERIFIED_SKILLS:
 
             <button
               onClick={exitFlow}
-              className="mt-10 bg-slate-900 dark:bg-white dark:text-slate-900 text-white font-black py-4 px-10 rounded-2xl shadow-xl hover:shadow-slate-500/20 hover:scale-105 transform transition-all active:scale-95 uppercase tracking-widest text-sm"
+              className="mt-10 bg-slate-900 dark:bg-white dark:text-slate-900 text-white font-black py-4 px-10 rounded-2xl shadow-xl hover:shadow-slate-500/20 transform transition-all uppercase tracking-widest text-sm"
             >
               {text('Go to Dashboard', 'Vai alla dashboard')}
             </button>
@@ -818,6 +957,50 @@ VERIFIED_SKILLS:
       <div className="mt-8">
         {renderStepContent()}
       </div>
+
+      {reRefineModal && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-950 shadow-2xl p-6">
+            <h2 className="text-base font-bold text-slate-800 dark:text-slate-100 mb-2">
+              {text('Update AI interview?', 'Aggiornare il chatbot AI?')}
+            </h2>
+            <p className="text-sm text-slate-500 dark:text-slate-400 mb-5">
+              {text(
+                'You have made significant changes to your skills or experience. Would you like to run the AI interview so recruiters see an accurate picture of your updated profile?',
+                'Hai modificato in modo sostanziale le tue skill o esperienze. Vuoi fare il chatbot AI così i recruiter vedono un profilo accurato e aggiornato?'
+              )}
+            </p>
+            {candidate.ai_refined && (
+              <p className="text-xs text-slate-400 dark:text-slate-500 mb-5">
+                {text(
+                  'The previous interview will be archived in your profile.',
+                  'Il chatbot precedente verrà archiviato nel tuo profilo.'
+                )}
+              </p>
+            )}
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={handleConfirmReRefine}
+                className="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-2.5 rounded-xl text-sm transition-all"
+              >
+                {text('Yes, redo the AI interview', 'Sì, rifai il chatbot AI')}
+              </button>
+              <button
+                onClick={handleSaveWithoutReRefine}
+                className="w-full rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-900 py-2.5 text-sm font-semibold transition-all"
+              >
+                {text('No, save only', 'No, salva solo')}
+              </button>
+              <button
+                onClick={() => setReRefineModal(null)}
+                className="w-full text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 py-1.5 transition-colors"
+              >
+                {text('Cancel', 'Annulla')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -10,7 +10,7 @@
  * Names are lowercase-normalized for fuzzy lookup.
  */
 
-const TIER_1_UNIVERSITIES: string[] = [
+export const TIER_1_UNIVERSITIES: string[] = [
     // US
     'mit', 'massachusetts institute of technology',
     'stanford', 'stanford university',
@@ -61,7 +61,7 @@ const TIER_1_UNIVERSITIES: string[] = [
     'waterloo', 'university of waterloo',
 ];
 
-const TIER_2_UNIVERSITIES: string[] = [
+export const TIER_2_UNIVERSITIES: string[] = [
     // US
     'michigan', 'university of michigan', 'umich',
     'nyu', 'new york university',
@@ -135,7 +135,7 @@ const TIER_2_UNIVERSITIES: string[] = [
     'unam',
 ];
 
-const TIER_3_UNIVERSITIES: string[] = [
+export const TIER_3_UNIVERSITIES: string[] = [
     // Broader well-known universities
     'arizona state', 'asu',
     'ohio state', 'osu',
@@ -191,37 +191,61 @@ const TIER_3_UNIVERSITIES: string[] = [
 ];
 
 /** Normalize a university name for lookup. */
-const normalizeUniName = (name: string): string =>
+export const normalizeUniName = (name: string): string =>
     name.toLowerCase().trim()
         .replace(/[''`]/g, "'")
         .replace(/[–—]/g, '-')
         .replace(/\s+/g, ' ');
 
-const tier1Set = new Set(TIER_1_UNIVERSITIES.map(normalizeUniName));
-const tier2Set = new Set(TIER_2_UNIVERSITIES.map(normalizeUniName));
-const tier3Set = new Set(TIER_3_UNIVERSITIES.map(normalizeUniName));
+const defaultTier1Set = new Set(TIER_1_UNIVERSITIES.map(normalizeUniName));
+const defaultTier2Set = new Set(TIER_2_UNIVERSITIES.map(normalizeUniName));
+const defaultTier3Set = new Set(TIER_3_UNIVERSITIES.map(normalizeUniName));
+
+export interface UniversityTierLists {
+    tier1?: string[];
+    tier2?: string[];
+    tier3?: string[];
+}
+
+const buildTierSets = (overrides?: UniversityTierLists | null) => {
+    if (!overrides) {
+        return { t1: defaultTier1Set, t2: defaultTier2Set, t3: defaultTier3Set };
+    }
+    const t1 = Array.isArray(overrides.tier1)
+        ? new Set(overrides.tier1.map(normalizeUniName).filter(Boolean))
+        : defaultTier1Set;
+    const t2 = Array.isArray(overrides.tier2)
+        ? new Set(overrides.tier2.map(normalizeUniName).filter(Boolean))
+        : defaultTier2Set;
+    const t3 = Array.isArray(overrides.tier3)
+        ? new Set(overrides.tier3.map(normalizeUniName).filter(Boolean))
+        : defaultTier3Set;
+    return { t1, t2, t3 };
+};
 
 /**
  * Returns the prestige tier for a university.
- * 1 = top 50, 2 = top 200, 3 = top 500, 4 = other/unknown
+ * 1 = top 50, 2 = top 200, 3 = top 500, 4 = other/unknown.
+ * Optional `overrides` replace the default tier lists (per-job customization).
  */
-export const getUniversityTier = (institutionName: string): number => {
+export const getUniversityTier = (institutionName: string, overrides?: UniversityTierLists | null): number => {
     if (!institutionName) return 4;
     const name = normalizeUniName(institutionName);
+    const { t1, t2, t3 } = buildTierSets(overrides);
 
     // Exact match
-    if (tier1Set.has(name)) return 1;
-    if (tier2Set.has(name)) return 2;
-    if (tier3Set.has(name)) return 3;
+    if (t1.has(name)) return 1;
+    if (t2.has(name)) return 2;
+    if (t3.has(name)) return 3;
 
     // Substring match: check if any known name appears in the input or vice versa
-    for (const known of tier1Set) {
+    for (const known of t1) {
         if (known.length >= 4 && (name.includes(known) || known.includes(name))) return 1;
     }
-    for (const known of tier2Set) {
+    for (const known of t2) {
         if (known.length >= 4 && (name.includes(known) || known.includes(name))) return 2;
     }
-    for (const known of tier3Set) {
+    for (const known of t3) {
         if (known.length >= 4 && (name.includes(known) || known.includes(name))) return 3;
     }
 

@@ -4,6 +4,7 @@ import { AiBanner, Spinner } from './common';
 import { useLanguage } from './LanguageProvider';
 import { toast } from 'sonner';
 import CompanyLogo from './CompanyLogo';
+import { hasCurrentQuizResult, isJobQuizEnabled } from '../utils/questionnaire';
 
 interface JobDetailsPageProps {
   job: JobProfile;
@@ -13,6 +14,7 @@ interface JobDetailsPageProps {
   onBack: () => void;
   onApply: (updatedJob: JobProfile) => void | Promise<void>;
   onUnapply: (updatedJob: JobProfile) => void | Promise<void>;
+  applicantCount?: number;
   onOpenEvaluation?: () => void;
   onOpenProfileRefine?: () => void;
 }
@@ -27,6 +29,7 @@ const JobDetailsPage: React.FC<JobDetailsPageProps> = ({
   onBack,
   onApply,
   onUnapply,
+  applicantCount,
   onOpenEvaluation,
 }) => {
   const { text } = useLanguage();
@@ -34,12 +37,16 @@ const JobDetailsPage: React.FC<JobDetailsPageProps> = ({
   const [isUnapplying, setIsUnapplying] = useState(false);
   const [showUnapplyConfirm, setShowUnapplyConfirm] = useState(false);
   const isRecruiterView = viewerRole === 'recruiter';
+  const quizEnabled = isJobQuizEnabled(job);
+  const isExcludedByRecruiter = !isRecruiterView && !!candidate &&
+    job.candidate_interest_reviews?.[candidate.id]?.decision === 'not_interested';
   const isAlreadyApplicant =
     !isRecruiterView &&
     !!candidate &&
     !!job.applicant_emails?.some((e) => e.toLowerCase().trim() === candidate.contacts.email.toLowerCase().trim());
   const [hasApplied, setHasApplied] = useState(isAlreadyApplicant);
-  const hasCompletedAssessment = Boolean(candidate?.test_results?.some((result) => result.job_id === job.id));
+  const hasCompletedAssessment = Boolean(candidate && hasCurrentQuizResult(candidate, job));
+  const displayedApplicantCount = applicantCount ?? (job.applicant_emails?.length || 0);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -98,7 +105,7 @@ const JobDetailsPage: React.FC<JobDetailsPageProps> = ({
       >
         <svg
           xmlns="http://www.w3.org/2000/svg"
-          className="h-4 w-4 transform group-hover:-translate-x-1 transition-transform"
+          className="h-4 w-4 transform transition-transform"
           fill="none"
           viewBox="0 0 24 24"
           stroke="currentColor"
@@ -110,7 +117,7 @@ const JobDetailsPage: React.FC<JobDetailsPageProps> = ({
       {!isRecruiterView && <AiBanner context="seeker" />}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-10">
-        <div className="lg:col-span-2 space-y-10">
+        <div className="lg:col-span-2 space-y-6">
           <header>
             <div className="flex flex-wrap gap-2 mb-4">
               <span className="bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300 text-[10px] font-black uppercase px-2.5 py-1 rounded-lg">
@@ -126,6 +133,7 @@ const JobDetailsPage: React.FC<JobDetailsPageProps> = ({
                 companyName={job.company_name}
                 size="lg"
                 className="shrink-0"
+                fullBleed
               />
               <div className="min-w-0">
                 <h1 className="mb-2 text-3xl font-black leading-tight text-slate-900 sm:text-4xl dark:text-slate-100">
@@ -138,13 +146,12 @@ const JobDetailsPage: React.FC<JobDetailsPageProps> = ({
             </div>
           </header>
 
-          <section className="bg-slate-50 dark:bg-slate-800/40 p-6 rounded-3xl border border-slate-100 dark:border-slate-800">
-            <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4 flex items-center gap-2">
-              <span className="h-1.5 w-1.5 bg-orange-500 rounded-full"></span>
+          <section>
+            <h3 className="mb-3 text-lg font-black uppercase tracking-widest text-slate-500 dark:text-slate-400">
               {text('Summary', 'Sintesi')}
             </h3>
-            <p className="text-slate-700 dark:text-slate-300 leading-relaxed font-medium italic">
-              "{job.summary_text}"
+            <p className="whitespace-pre-wrap text-slate-600 dark:text-slate-400 leading-relaxed">
+              {job.summary_text}
             </p>
           </section>
 
@@ -361,27 +368,35 @@ const JobDetailsPage: React.FC<JobDetailsPageProps> = ({
                       {text('Applicants', 'Candidati')}
                     </p>
                     <p className="font-bold text-slate-700 dark:text-slate-300">
-                      {job.applicant_emails?.length || 0} {text('tracked', 'tracciati')}
+                      {displayedApplicantCount} {text(
+                        displayedApplicantCount === 1 ? 'applicant' : 'applicants',
+                        displayedApplicantCount === 1 ? 'candidato' : 'candidati'
+                      )}
                     </p>
                   </div>
                 </div>
               )}
             </div>
 
-            {isRecruiterView ? (
-              <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40 px-5 py-4">
-                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
-                  {text('Recruiter View', 'Vista recruiter')}
-                </p>
-                <p className="text-sm font-medium text-slate-600 dark:text-slate-300 leading-relaxed">
-                  {text(
-                    'This page mirrors the seeker-facing job card as a read-only summary so you can inspect the posting quickly.',
-                    'Questa pagina replica la card visibile al candidato in sola lettura, così puoi controllare rapidamente il posting.'
-                  )}
-                </p>
-              </div>
-            ) : (
+            {!isRecruiterView && (
               <>
+                {isExcludedByRecruiter ? (
+                  <div className="rounded-2xl border border-rose-200 bg-rose-50 px-5 py-4 dark:border-rose-900/50 dark:bg-rose-950/20">
+                    <p className="mb-1 text-[10px] font-black uppercase tracking-widest text-rose-500 dark:text-rose-400">
+                      {text('Application status', 'Stato candidatura')}
+                    </p>
+                    <p className="text-sm font-semibold text-rose-700 dark:text-rose-300">
+                      {text('Not selected', 'Non selezionato')}
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-rose-600/80 dark:text-rose-400/80">
+                      {text(
+                        'The recruiter has reviewed your profile and decided not to proceed with your application for this position.',
+                        'Il recruiter ha esaminato il tuo profilo e ha deciso di non procedere con la tua candidatura per questa posizione.'
+                      )}
+                    </p>
+                  </div>
+                ) : (
+                  <>
                 {showUnapplyConfirm && (
                   <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
                     <div className="mx-4 w-full max-w-md rounded-[28px] border border-slate-200 bg-white p-8 shadow-xl dark:border-slate-800 dark:bg-slate-950">
@@ -419,7 +434,7 @@ const JobDetailsPage: React.FC<JobDetailsPageProps> = ({
                 <button
                   onClick={hasApplied ? () => setShowUnapplyConfirm(true) : handleApplyAction}
                   disabled={isApplying || isUnapplying}
-                  className={`w-full font-black py-4 px-6 rounded-2xl shadow-xl transition-all active:scale-95 flex items-center justify-center gap-3 group ${
+                  className={`w-full font-black py-4 px-6 rounded-2xl shadow-xl transition-all flex items-center justify-center gap-3 group ${
                     hasApplied
                       ? 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-300'
                       : 'bg-orange-500 text-white hover:bg-orange-600 hover:shadow-orange-500/30'
@@ -432,7 +447,7 @@ const JobDetailsPage: React.FC<JobDetailsPageProps> = ({
                       {text('No Longer Interested', 'Non sei più interessato')}
                       <svg
                         xmlns="http://www.w3.org/2000/svg"
-                        className="h-5 w-5 transform group-hover:translate-x-1 transition-transform"
+                        className="h-5 w-5 transform transition-transform"
                         fill="none"
                         viewBox="0 0 24 24"
                         stroke="currentColor"
@@ -445,7 +460,7 @@ const JobDetailsPage: React.FC<JobDetailsPageProps> = ({
                       {text('Manifest Interest', 'Mostra interesse')}
                       <svg
                         xmlns="http://www.w3.org/2000/svg"
-                        className="h-5 w-5 transform group-hover:translate-x-1 transition-transform"
+                        className="h-5 w-5 transform transition-transform"
                         fill="none"
                         viewBox="0 0 24 24"
                         stroke="currentColor"
@@ -460,40 +475,30 @@ const JobDetailsPage: React.FC<JobDetailsPageProps> = ({
                     </>
                   )}
                 </button>
-                {hasApplied ? (
+                {hasApplied && quizEnabled && hasCompletedAssessment ? (
                   <div className="mt-4 rounded-2xl border border-sky-200 bg-sky-50/80 px-5 py-4 text-sky-800 dark:border-sky-900/60 dark:bg-sky-900/20 dark:text-sky-200">
                     <p className="mb-1 text-[10px] font-black uppercase tracking-widest opacity-80">
                       {text('Next step', 'Prossimo step')}
                     </p>
                     <p className="text-sm font-medium leading-relaxed">
-                      {hasCompletedAssessment
-                        ? text(
-                            'You have already completed the questionnaire associated with this job.',
-                            'Hai già completato il questionario associato a questo lavoro.'
-                          )
-                        : hasAssessmentRequest
-                          ? text(
-                              'Complete the questionnaire associated with this job so the recruiter can continue the evaluation.',
-                              'Completa il questionario associato a questo lavoro così il recruiter può proseguire la valutazione.'
-                            )
-                          : text(
-                              'A questionnaire specific to this job may be requested by the recruiter. It has not been requested yet.',
-                              'Un questionario specifico per questo lavoro può essere richiesto dal recruiter. Non è ancora stato richiesto.'
-                            )}
+                      {text(
+                        'You have already completed the questionnaire associated with this job.',
+                        'Hai già completato il questionario associato a questo lavoro.'
+                      )}
                     </p>
-                    {hasAssessmentRequest && onOpenEvaluation ? (
+                    {onOpenEvaluation ? (
                       <button
                         type="button"
                         onClick={onOpenEvaluation}
                         className="mt-4 inline-flex w-full items-center justify-center rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm shadow-sky-600/20 transition-colors hover:bg-sky-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40"
                       >
-                        {hasCompletedAssessment
-                          ? text('Review questionnaire', 'Rivedi questionario')
-                          : text('Open questionnaire', 'Accedi al questionario')}
+                        {text('Review questionnaire', 'Rivedi questionario')}
                       </button>
                     ) : null}
                   </div>
                 ) : null}
+                  </>
+                )}
               </>
             )}
           </div>

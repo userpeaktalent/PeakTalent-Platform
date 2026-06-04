@@ -1,8 +1,56 @@
-import { JobProfile, CandidateProfile, MatchScoreBreakdown } from '../types';
+import { JobProfile, CandidateProfile, MatchScoreBreakdown, MatchingPillarWeights } from '../types';
+
+export const MATCHING_ALGORITHM_VERSION = 'v1.1.0';
+
+// Audit trail: maps version → weights snapshot + activation date
+export const MATCHING_WEIGHTS_HISTORY: Record<string, { activatedAt: string; weights: Record<string, number> }> = {
+  'v1.0.0': {
+    activatedAt: '2025-01-01',
+    weights: { semantic: 0.40, hard: 0.20, constraint: 0.00, industry: 0.10, experience: 0.10, education: 0.10, careerPrestige: 0.10 },
+  },
+  'v1.1.0': {
+    activatedAt: '2026-05-18',
+    weights: { semantic: 0.50, hard: 0.30, constraint: 0.00, industry: 0.05, experience: 0.00, education: 0.10, careerPrestige: 0.05 },
+  },
+};
+
+export const DEFAULT_MATCHING_PILLAR_WEIGHTS: MatchingPillarWeights = {
+    semantic: 0.50,
+    hard: 0.30,
+    industry: 0.05,
+    education: 0.10,
+    careerPrestige: 0.05,
+};
+
+export const normalizeMatchingPillarWeights = (
+    weights?: Partial<MatchingPillarWeights> | null
+): MatchingPillarWeights => {
+    const rawWeights: MatchingPillarWeights = {
+        semantic: Number.isFinite(weights?.semantic) && Number(weights?.semantic) >= 0 ? Number(weights?.semantic) : DEFAULT_MATCHING_PILLAR_WEIGHTS.semantic,
+        hard: Number.isFinite(weights?.hard) && Number(weights?.hard) >= 0 ? Number(weights?.hard) : DEFAULT_MATCHING_PILLAR_WEIGHTS.hard,
+        industry: Number.isFinite(weights?.industry) && Number(weights?.industry) >= 0 ? Number(weights?.industry) : DEFAULT_MATCHING_PILLAR_WEIGHTS.industry,
+        education: Number.isFinite(weights?.education) && Number(weights?.education) >= 0 ? Number(weights?.education) : DEFAULT_MATCHING_PILLAR_WEIGHTS.education,
+        careerPrestige: Number.isFinite(weights?.careerPrestige) && Number(weights?.careerPrestige) >= 0 ? Number(weights?.careerPrestige) : DEFAULT_MATCHING_PILLAR_WEIGHTS.careerPrestige,
+    };
+
+    const total = Object.values(rawWeights).reduce((sum, value) => sum + value, 0);
+    if (!Number.isFinite(total) || total <= 0) {
+        return DEFAULT_MATCHING_PILLAR_WEIGHTS;
+    }
+
+    return {
+        semantic: rawWeights.semantic / total,
+        hard: rawWeights.hard / total,
+        industry: rawWeights.industry / total,
+        education: rawWeights.education / total,
+        careerPrestige: rawWeights.careerPrestige / total,
+    };
+};
 import { cosineSimilarity } from './vectorMath';
 import { areSynonyms, areFuzzyMatch, getSkillRelationScore, getSkillClusterIndex } from './synonyms';
 import { getUniversityTier, universityTierToScore } from './universityTiers';
 import { getCompanyTier, companyTierToScore } from './companyPrestige';
+import { getEducationLevelOrdinal } from './education';
 
 /**
  * CEFR level mapping for comparison.
@@ -78,60 +126,7 @@ export const compareCefr = (candLevel: string, jobLevel: string): boolean => {
 
 // ─── Education Degree Hierarchy ──────────────────────────────────────────────
 
-/**
- * Maps degree codes to ordinal values for comparison.
- * Higher ordinal = higher education level.
- */
-const DEGREE_ORDINAL: Record<string, number> = {
-    'hsd': 1,
-    'high school diploma': 1, 'high school diploma (hsd)': 1,
-    'ad': 2,
-    'associate degree': 2, 'associate degree (ad)': 2,
-    // All bachelor's are equal
-    'ba': 3, 'bachelor of arts': 3, 'bachelor of arts (ba)': 3,
-    'bsc': 3, 'bachelor of science': 3, 'bachelor of science (bsc)': 3,
-    'beng': 3, 'bachelor of engineering': 3, 'bachelor of engineering (beng)': 3,
-    'btech': 3, 'bachelor of technology': 3, 'bachelor of technology (btech)': 3,
-    'bba': 3, 'bachelor of business administration': 3, 'bachelor of business administration (bba)': 3,
-    'bcom': 3, 'bachelor of commerce': 3, 'bachelor of commerce (bcom)': 3,
-    'llb': 3, 'bachelor of laws': 3, 'bachelor of laws (llb)': 3,
-    'barch': 3, 'bachelor of architecture': 3, 'bachelor of architecture (barch)': 3,
-    'bachelor': 3,
-    // All master's are equal
-    'ma': 4, 'master of arts': 4, 'master of arts (ma)': 4,
-    'msc': 4, 'master of science': 4, 'master of science (msc)': 4,
-    'meng': 4, 'master of engineering': 4, 'master of engineering (meng)': 4,
-    'mba': 4, 'master of business administration': 4, 'master of business administration (mba)': 4,
-    'llm': 4, 'master of laws': 4, 'master of laws (llm)': 4,
-    'mfin': 4, 'master of finance': 4, 'master of finance (mfin)': 4,
-    'mpa': 4, 'master of public administration': 4, 'master of public administration (mpa)': 4,
-    'master': 4,
-    // Doctoral
-    'phd': 5, 'doctor of philosophy': 5, 'doctor of philosophy (phd)': 5,
-    'dba': 5, 'doctor of business administration': 5, 'doctor of business administration (dba)': 5,
-    'md': 5, 'doctor of medicine': 5, 'doctor of medicine (md)': 5,
-    'jd': 5, 'juris doctor': 5, 'juris doctor (jd)': 5,
-    'doctorate': 5,
-    // Post-doctoral
-    'postdoc': 6, 'postdoctoral': 6, 'postdoctoral research': 6, 'postdoctoral research (postdoc)': 6,
-};
-
-/**
- * Get the ordinal level of a degree string (1–6, 0 if unknown).
- */
-const getDegreeOrdinal = (degreeLevel: string): number => {
-    if (!degreeLevel) return 0;
-    const key = degreeLevel.toLowerCase().trim();
-    if (DEGREE_ORDINAL[key] !== undefined) return DEGREE_ORDINAL[key];
-    // Fuzzy fallback: check if it contains a known keyword
-    if (key.includes('postdoc')) return 6;
-    if (key.includes('phd') || key.includes('doctor')) return 5;
-    if (key.includes('master') || key.includes('msc') || key.includes('mba')) return 4;
-    if (key.includes('bachelor') || key.includes('bsc') || key.includes('beng')) return 3;
-    if (key.includes('associate')) return 2;
-    if (key.includes('high school') || key.includes('diploma')) return 1;
-    return 0;
-};
+const getDegreeOrdinal = (degreeLevel?: string | null): number => getEducationLevelOrdinal(degreeLevel);
 
 // ─── Skill Similarity ────────────────────────────────────────────────────────
 
@@ -173,6 +168,7 @@ type CandidateSkillEvidence = {
 
 type BackgroundFamilyRule = {
     id: string;
+    familyGroup: 'software' | 'data' | 'analytics' | 'engineering' | 'finance';
     evidencePatterns: string[];
     jobPatterns: string[];
     semanticSupport: number;
@@ -182,6 +178,7 @@ type BackgroundFamilyRule = {
 const BACKGROUND_FAMILY_RULES: BackgroundFamilyRule[] = [
     {
         id: 'computing-core',
+        familyGroup: 'software',
         evidencePatterns: [
             'computer science',
             'cs',
@@ -232,6 +229,7 @@ const BACKGROUND_FAMILY_RULES: BackgroundFamilyRule[] = [
     },
     {
         id: 'data-core',
+        familyGroup: 'data',
         evidencePatterns: [
             'data science',
             'machine learning',
@@ -266,6 +264,7 @@ const BACKGROUND_FAMILY_RULES: BackgroundFamilyRule[] = [
     },
     {
         id: 'analytics-core',
+        familyGroup: 'analytics',
         evidencePatterns: [
             'business analytics',
             'data analytics',
@@ -292,6 +291,7 @@ const BACKGROUND_FAMILY_RULES: BackgroundFamilyRule[] = [
     },
     {
         id: 'frontend-web',
+        familyGroup: 'software',
         evidencePatterns: [
             'frontend developer',
             'frontend engineer',
@@ -330,6 +330,7 @@ const BACKGROUND_FAMILY_RULES: BackgroundFamilyRule[] = [
     },
     {
         id: 'backend-platform',
+        familyGroup: 'software',
         evidencePatterns: [
             'backend developer',
             'backend engineer',
@@ -370,6 +371,7 @@ const BACKGROUND_FAMILY_RULES: BackgroundFamilyRule[] = [
     },
     {
         id: 'engineering-core',
+        familyGroup: 'engineering',
         evidencePatterns: [
             'mechanical engineering',
             'electrical engineering',
@@ -419,13 +421,141 @@ const BACKGROUND_FAMILY_RULES: BackgroundFamilyRule[] = [
         ],
         semanticSupport: 0.95,
         inferredSkills: [
+            { skill_name: 'CAD', level: 5 },
+            { skill_name: 'Technical Drawing', level: 6 },
             { skill_name: 'Process Engineering', level: 6 },
             { skill_name: 'Root Cause Analysis', level: 6 },
             { skill_name: 'Technical Documentation', level: 6 },
             { skill_name: 'Process Improvement', level: 6 },
+            { skill_name: 'Lean Manufacturing', level: 5 },
+            { skill_name: 'FMEA', level: 5 },
+            { skill_name: 'GD&T', level: 5 },
+        ],
+    },
+    {
+        id: 'mechanical-design-core',
+        familyGroup: 'engineering',
+        evidencePatterns: [
+            'mechanical engineering',
+            'mechanical design',
+            'mechanical design engineer',
+            'design engineer',
+            'product design engineer',
+            'automotive engineering',
+            'chassis',
+            'cad designer',
+            'cad engineer',
+        ],
+        jobPatterns: [
+            'mechanical design engineer',
+            'associate mechanical design engineer',
+            'design engineer',
+            'product design engineer',
+            'mechanical engineer',
+            'cad engineer',
+            'chassis',
+            'vehicle design',
+            'automotive engineering',
+        ],
+        semanticSupport: 0.97,
+        inferredSkills: [
+            { skill_name: 'Mechanical Design', level: 7 },
+            { skill_name: 'CAD', level: 7 },
+            { skill_name: '3D CAD', level: 7 },
+            { skill_name: 'SolidWorks', level: 7 },
+            { skill_name: 'CATIA', level: 6 },
+            { skill_name: 'GD&T', level: 6 },
+            { skill_name: 'Technical Drawing', level: 7 },
+            { skill_name: 'Tolerance Analysis', level: 6 },
+            { skill_name: 'Design for Manufacturing', level: 6 },
+            { skill_name: 'Finite Element Analysis', level: 5 },
+        ],
+    },
+    {
+        id: 'aerospace-core',
+        familyGroup: 'engineering',
+        evidencePatterns: [
+            'aerospace engineering',
+            'aeronautical engineering',
+            'aerospace engineer',
+            'aeronautical engineer',
+            'avionics',
+            'flight mechanics',
+            'aerodynamics',
+            'propulsion',
+            'space systems',
+        ],
+        jobPatterns: [
+            'aerospace engineer',
+            'aeronautical engineer',
+            'avionics engineer',
+            'flight systems engineer',
+            'propulsion engineer',
+            'space systems engineer',
+            'aircraft design',
+            'aerospace design',
+        ],
+        semanticSupport: 0.98,
+        inferredSkills: [
+            { skill_name: 'Systems Engineering', level: 7 },
+            { skill_name: 'CAD', level: 6 },
+            { skill_name: 'CATIA', level: 6 },
+            { skill_name: 'Technical Documentation', level: 6 },
+            { skill_name: 'Finite Element Analysis', level: 6 },
+            { skill_name: 'CFD', level: 6 },
+            { skill_name: 'Simulation', level: 6 },
+            { skill_name: 'Mechanical Design', level: 5 },
+        ],
+    },
+    {
+        id: 'finance-accounting-core',
+        familyGroup: 'finance',
+        evidencePatterns: [
+            'accounting',
+            'accountant',
+            'financial accounting',
+            'finance',
+            'auditor',
+            'audit',
+            'bookkeeping',
+            'controller',
+            'accounts payable',
+            'accounts receivable',
+            'payroll',
+            'tax',
+            'contabile',
+        ],
+        jobPatterns: [
+            'accountant',
+            'financial analyst',
+            'controller',
+            'auditor',
+            'finance manager',
+            'payroll specialist',
+            'accounting',
+            'bookkeeper',
+        ],
+        semanticSupport: 0.92,
+        inferredSkills: [
+            { skill_name: 'Accounting', level: 7 },
+            { skill_name: 'Financial Reporting', level: 7 },
+            { skill_name: 'Bookkeeping', level: 6 },
+            { skill_name: 'Excel', level: 7 },
+            { skill_name: 'Reconciliation', level: 6 },
+            { skill_name: 'Budgeting', level: 6 },
+            { skill_name: 'SAP', level: 5 },
+            { skill_name: 'General Ledger', level: 6 },
         ],
     },
 ];
+
+const FAMILY_GROUP_COMPATIBILITY: Record<BackgroundFamilyRule['familyGroup'], BackgroundFamilyRule['familyGroup'][]> = {
+    software: ['software', 'data', 'analytics'],
+    data: ['data', 'analytics', 'software'],
+    analytics: ['analytics', 'data', 'software', 'finance'],
+    engineering: ['engineering'],
+    finance: ['finance', 'analytics'],
+};
 
 const normalizeTextBlock = (value?: string): string =>
     (value || '')
@@ -461,6 +591,23 @@ const getMatchingBackgroundFamilyRules = (
     texts: string[],
     patternKey: 'evidencePatterns' | 'jobPatterns'
 ): BackgroundFamilyRule[] => BACKGROUND_FAMILY_RULES.filter((rule) => matchesAnyPattern(texts, rule[patternKey]));
+
+const getFamilyGroups = (rules: BackgroundFamilyRule[]) => Array.from(new Set(rules.map((rule) => rule.familyGroup)));
+
+const haveCompatibleFamilyGroups = (
+    candidateGroups: BackgroundFamilyRule['familyGroup'][],
+    jobGroups: BackgroundFamilyRule['familyGroup'][]
+) => {
+    if (candidateGroups.length === 0 || jobGroups.length === 0) return true;
+
+    return candidateGroups.some((candidateGroup) =>
+        jobGroups.some((jobGroup) =>
+            candidateGroup === jobGroup ||
+            FAMILY_GROUP_COMPATIBILITY[candidateGroup]?.includes(jobGroup) ||
+            FAMILY_GROUP_COMPATIBILITY[jobGroup]?.includes(candidateGroup)
+        )
+    );
+};
 
 // Ranking runs `getTermRelationScore` in nested loops across many candidates/jobs.
 // The inputs are a small vocabulary of skill/role tokens, so an LRU-style cache
@@ -596,7 +743,7 @@ const buildCandidateSkillPool = (candidate: CandidateProfile): CandidateSkillEvi
         rule.inferredSkills.forEach((skill) => {
             mergeSkillEvidence(merged, {
                 ...skill,
-                level_confidence: 'low',
+                level_confidence: rule.semanticSupport >= 0.95 ? 'medium' : 'low',
                 level_source: 'inferred',
             });
         });
@@ -724,6 +871,47 @@ const getExperienceTrajectorySupport = (candidate: CandidateProfile, jobSemantic
     return Math.min(1.0, countScore + currentBonus + yearsBonus);
 };
 
+const getProvenRoleExperienceAlignment = (job: JobProfile, candidate: CandidateProfile): number => {
+    const jobRoleTerms = compactStrings([
+        job.title,
+        job.job_function,
+        job.summary_text,
+        ...(Array.isArray(job.industry) ? job.industry : []),
+        ...job.skills.slice(0, 6).map((skill) => skill.skill_name),
+        ...job.it_skills.slice(0, 4).map((skill) => skill.skill_name),
+    ]);
+    const experienceTerms = compactStrings([
+        candidate.current_job_function,
+        ...(candidate.experiences || []).flatMap((entry) => [entry.role, entry.description]),
+    ]);
+
+    if (!jobRoleTerms.length || !experienceTerms.length) return 0;
+
+    return Math.max(
+        getBestPairwiseRelation(experienceTerms, jobRoleTerms),
+        getSemanticFamilySupport(experienceTerms, jobRoleTerms)
+    );
+};
+
+const hasProvenSimilarRoleExperience = (
+    job: JobProfile,
+    candidate: CandidateProfile,
+    signals: StructuredSemanticSignals,
+): boolean => {
+    if (signals.hasIncompatibleFamilyBackground) return false;
+
+    const roleExperienceAlignment = getProvenRoleExperienceAlignment(job, candidate);
+    const strongRoleMatch = roleExperienceAlignment >= 0.82;
+    const strongTrajectoryMatch =
+        signals.experienceTrajectorySupport >= 0.75 &&
+        (signals.familySupport >= 0.82 || signals.skillAnchorCoverage >= 0.55);
+
+    return strongRoleMatch || strongTrajectoryMatch;
+};
+
+const hasExplicitHardSkillInventory = (candidateSkillPool: CandidateSkillEvidence[]): boolean =>
+    candidateSkillPool.some((skill) => skill.level_source !== 'inferred' && normalizeSkillName(skill.skill_name));
+
 export type StructuredSemanticBreakdown = {
     directRoleAlignment: number;
     familySupport: number;
@@ -745,6 +933,9 @@ type StructuredSemanticSignals = {
     trajectorySupport: number;
     hasSpecificFamilyTarget: boolean;
     hasEngineeringTarget: boolean;
+    candidateFamilyGroups: BackgroundFamilyRule['familyGroup'][];
+    jobFamilyGroups: BackgroundFamilyRule['familyGroup'][];
+    hasIncompatibleFamilyBackground: boolean;
 };
 
 const collectStructuredSemanticSignals = (
@@ -762,7 +953,10 @@ const collectStructuredSemanticSignals = (
     const educationTrajectorySupport = getEducationTrajectorySupport(candidate, jobSemanticTerms);
     const experienceTrajectorySupport = getExperienceTrajectorySupport(candidate, jobSemanticTerms);
     const trajectorySupport = (educationTrajectorySupport * 0.45) + (experienceTrajectorySupport * 0.55);
+    const matchedCandidateFamilies = getMatchingBackgroundFamilyRules(candidateEvidenceTexts, 'evidencePatterns');
     const matchedJobFamilies = getMatchingBackgroundFamilyRules(jobSemanticTerms, 'jobPatterns');
+    const candidateFamilyGroups = getFamilyGroups(matchedCandidateFamilies);
+    const jobFamilyGroups = getFamilyGroups(matchedJobFamilies);
 
     return {
         directRoleAlignment,
@@ -772,7 +966,13 @@ const collectStructuredSemanticSignals = (
         experienceTrajectorySupport,
         trajectorySupport,
         hasSpecificFamilyTarget: matchedJobFamilies.length > 0,
-        hasEngineeringTarget: matchedJobFamilies.some((rule) => rule.id === 'engineering-core'),
+        hasEngineeringTarget: matchedJobFamilies.some((rule) => rule.familyGroup === 'engineering'),
+        candidateFamilyGroups,
+        jobFamilyGroups,
+        hasIncompatibleFamilyBackground:
+            matchedJobFamilies.length > 0 &&
+            matchedCandidateFamilies.length > 0 &&
+            !haveCompatibleFamilyGroups(candidateFamilyGroups, jobFamilyGroups),
     };
 };
 
@@ -791,10 +991,10 @@ export const debugStructuredSemantic = (
     } = collectStructuredSemanticSignals(job, candidate, pool);
 
     const rawBaseScore = (
-        (directRoleAlignment * 0.16) +
+        (directRoleAlignment * 0.18) +
         (familySupport * 0.30) +
-        (skillAnchorCoverage * 0.20) +
-        (trajectorySupport * 0.34)
+        (skillAnchorCoverage * 0.16) +
+        (trajectorySupport * 0.36)
     );
 
     const structuredScore = calculateStructuredSemanticScore(job, candidate, pool);
@@ -826,39 +1026,45 @@ const calculateStructuredSemanticScore = (
         trajectorySupport,
         hasSpecificFamilyTarget,
         hasEngineeringTarget,
+        hasIncompatibleFamilyBackground,
     } = collectStructuredSemanticSignals(job, candidate, candidateSkillPool);
 
     let structuredScore = (
-        (directRoleAlignment * 0.16) +
+        (directRoleAlignment * 0.18) +
         (familySupport * 0.30) +
-        (skillAnchorCoverage * 0.20) +
-        (trajectorySupport * 0.34)
+        (skillAnchorCoverage * 0.16) +
+        (trajectorySupport * 0.36)
     );
+
+    const addHeadroomScaledBonus = (bonus: number) => {
+        const headroom = Math.max(0, 1 - structuredScore);
+        structuredScore += bonus * headroom;
+    };
 
     // Additive alignment bonuses instead of Math.max floors: rewarding alignment
     // without collapsing differently-strong candidates onto the same plateau.
     if (familySupport >= 0.82 && skillAnchorCoverage >= 0.55) {
-        structuredScore += 0.03;
+        addHeadroomScaledBonus(0.03);
     }
 
     if ((directRoleAlignment >= 0.88 || familySupport >= 0.88) && skillAnchorCoverage >= 0.65) {
-        structuredScore += 0.04;
+        addHeadroomScaledBonus(0.04);
     }
 
     if (trajectorySupport >= 0.80 && familySupport >= 0.72) {
-        structuredScore += 0.05;
+        addHeadroomScaledBonus(0.07);
     }
 
     if (trajectorySupport >= 0.90 && skillAnchorCoverage >= 0.65 && (directRoleAlignment >= 0.70 || familySupport >= 0.82)) {
-        structuredScore += 0.04;
+        addHeadroomScaledBonus(0.05);
     }
 
     if (hasEngineeringTarget && familySupport >= 0.90 && educationTrajectorySupport >= 0.82 && experienceTrajectorySupport >= 0.80) {
-        structuredScore += 0.08;
+        addHeadroomScaledBonus(0.10);
     }
 
     if (hasEngineeringTarget && directRoleAlignment >= 0.72 && skillAnchorCoverage >= 0.62) {
-        structuredScore += 0.04;
+        addHeadroomScaledBonus(0.05);
     }
 
     const weakSpecificFamilyFit =
@@ -881,6 +1087,18 @@ const calculateStructuredSemanticScore = (
 
     if (lacksEngineeringBackground) {
         structuredScore = Math.min(structuredScore, 0.18);
+    }
+
+    const incompatibleFamilyFit =
+        hasSpecificFamilyTarget &&
+        hasIncompatibleFamilyBackground &&
+        directRoleAlignment < 0.60 &&
+        familySupport < 0.50 &&
+        trajectorySupport < 0.55 &&
+        skillAnchorCoverage < 0.58;
+
+    if (incompatibleFamilyFit) {
+        structuredScore = Math.min(structuredScore, hasEngineeringTarget ? 0.12 : 0.20);
     }
 
     return Math.min(1.0, Math.max(0, structuredScore));
@@ -1094,14 +1312,15 @@ export const calculateConstraintScore = (job: JobProfile, candidate: CandidatePr
  *   - Graduation mark (20%): higher normalized grade = better
  */
 const calculateEducationScore = (job: JobProfile, candidate: CandidateProfile): number => {
-    if (!candidate.education?.length) return 0.3; // No education data → low-neutral
+    if (!candidate.education?.length) return 0; // No education data → no education score
 
     // Find the candidate's highest/best education entry
+    const universityOverrides = job.ranking_universities ?? null;
     const eduEntries = candidate.education
         .map(e => ({
             ...e,
             ordinal: getDegreeOrdinal(e.degree_level),
-            uniTier: getUniversityTier(e.institution),
+            uniTier: getUniversityTier(e.institution, universityOverrides),
         }))
         .sort((a, b) => {
             // Sort by degree ordinal desc, then by uni tier asc (lower tier = better)
@@ -1134,7 +1353,7 @@ const calculateEducationScore = (job: JobProfile, candidate: CandidateProfile): 
     const uniScore = universityTierToScore(best.uniTier);
 
     // --- Graduation Mark Score (20%) ---
-    let markScore = 0.5; // Default neutral when no mark
+    let markScore = 0; // No mark evidence → no mark contribution
     // Use the best education entry that has a mark
     const withMark = eduEntries.find(e => e.final_mark != null && e.final_mark > 0);
     if (withMark && withMark.final_mark != null) {
@@ -1154,7 +1373,7 @@ const calculateEducationScore = (job: JobProfile, candidate: CandidateProfile): 
     }
 
     // Certifications provide a small, job-relevant boost when they align with required skills.
-    let certificationScore = 0.5;
+    let certificationScore = 0;
     if (candidate.certifications?.length) {
         const requiredSkillNames = [...job.skills, ...job.it_skills].map(s => normalizeSkillName(s.skill_name));
         const matchedCerts = candidate.certifications.filter(cert =>
@@ -1162,7 +1381,7 @@ const calculateEducationScore = (job: JobProfile, candidate: CandidateProfile): 
         ).length;
         certificationScore = matchedCerts > 0
             ? Math.min(1.0, 0.6 + matchedCerts * 0.15)
-            : 0.55;
+            : 0.25;
     }
 
     // Weighted combination
@@ -1176,8 +1395,10 @@ const calculateEducationScore = (job: JobProfile, candidate: CandidateProfile): 
  *   - Most recent company weighted 70%, others 30%
  *   - Unknown companies score neutral (0.35)
  */
-const calculateCareerPrestigeScore = (candidate: CandidateProfile): number => {
-    if (!candidate.experiences?.length) return 0.35; // No experience → neutral
+const calculateCareerPrestigeScore = (job: JobProfile, candidate: CandidateProfile): number => {
+    if (!candidate.experiences?.length) return 0; // No experience data → no prestige score
+
+    const companyOverrides = job.ranking_companies ?? null;
 
     // Sort experiences: current/most recent first
     const sorted = [...candidate.experiences].sort((a, b) => {
@@ -1187,13 +1408,13 @@ const calculateCareerPrestigeScore = (candidate: CandidateProfile): number => {
     });
 
     const recentCompany = sorted[0];
-    const recentTier = getCompanyTier(recentCompany.company);
+    const recentTier = getCompanyTier(recentCompany.company, companyOverrides);
     const recentScore = companyTierToScore(recentTier);
 
     if (sorted.length === 1) return recentScore;
 
     // Average score of other companies
-    const otherScores = sorted.slice(1).map(exp => companyTierToScore(getCompanyTier(exp.company)));
+    const otherScores = sorted.slice(1).map(exp => companyTierToScore(getCompanyTier(exp.company, companyOverrides)));
     const avgOtherScore = otherScores.reduce((sum, s) => sum + s, 0) / otherScores.length;
 
     return (recentScore * 0.70) + (avgOtherScore * 0.30);
@@ -1215,17 +1436,41 @@ const getLevelMatchScore = (candidateLevel?: number, requiredLevel?: number): nu
     return 0.2;
 };
 
+const getBackgroundSkillSupport = (
+    jobSkill: { skill_name: string; level: number },
+    candidateFamilyRules: BackgroundFamilyRule[]
+): number => {
+    let best = 0;
+
+    for (const rule of candidateFamilyRules) {
+        for (const inferredSkill of rule.inferredSkills) {
+            const relation = getTermRelationScore(inferredSkill.skill_name, jobSkill.skill_name);
+            if (relation === 0) continue;
+
+            const contribution = Math.min(
+                0.78,
+                relation * getLevelMatchScore(inferredSkill.level, jobSkill.level) * 0.72
+            );
+            if (contribution > best) best = contribution;
+        }
+    }
+
+    return best;
+};
+
 const evaluateHardSkills = (job: JobProfile, candidate: CandidateProfile, candidateSkillPool?: CandidateSkillEvidence[]): SkillEval => {
     const jobSkillsFull = [...job.skills, ...job.it_skills];
     const mustSkills = jobSkillsFull.filter(s => s.must);
     const niceSkills = jobSkillsFull.filter(s => !s.must);
     const candSkills = candidateSkillPool || buildCandidateSkillPool(candidate);
+    const candidateEvidenceTexts = collectCandidateEvidenceTexts(candidate);
+    const candidateFamilyRules = getMatchingBackgroundFamilyRules(candidateEvidenceTexts, 'evidencePatterns');
 
     // Family-rule inferred skills (e.g. a CS degree implying Python) are
     // plausibility signals, not proof of proficiency. Weight them well below
     // explicit CV/chat evidence so a candidate who merely *could* know the
     // skill can't ride it to a top score.
-    const INFERRED_WEIGHT = 0.55;
+    const INFERRED_WEIGHT = 0.74;
 
     // Domain-proximity floor: a CV is never an exhaustive list of what someone
     // can do. If a candidate's *explicit* skills already cover other clusters
@@ -1290,13 +1535,18 @@ const evaluateHardSkills = (job: JobProfile, candidate: CandidateProfile, candid
                 matched++;
                 totalScore += bestContribution;
             } else {
+                const backgroundSupport = getBackgroundSkillSupport(
+                    js,
+                    candidateFamilyRules
+                );
+
                 // Unlisted skill: apply the proximity floor. If the candidate
                 // is clearly "in the family" (proximity high), an unlisted
                 // must still earns partial credit — a CV is never an exhaustive
                 // skill inventory. Floor is capped strictly below cluster
                 // partials so a real cluster sibling always outranks pure
                 // proximity credit.
-                totalScore += missFloor;
+                totalScore += Math.max(missFloor, backgroundSupport);
             }
         }
         return {
@@ -1334,24 +1584,23 @@ const evaluateHardSkills = (job: JobProfile, candidate: CandidateProfile, candid
     };
 };
 
-// ─── Main 7-Pillar Scoring ───────────────────────────────────────────────────
+// ─── Main 6-Pillar Scoring ───────────────────────────────────────────────────
 
 /**
- * Enhanced ranking logic based on 8 weighted dimensions.
+ * Enhanced ranking logic based on 6 weighted dimensions.
  *
- * Pillar 1: AI Semantic Alignment (40%) — Cosine similarity + structured role-fit
- * Pillar 2: Hard Skills Match (20%) — Technical skills overlap (with fuzzy matching)
+ * Pillar 1: AI Semantic Alignment (50%) — Cosine similarity + structured role-fit
+ * Pillar 2: Hard Skills Match (30%) — Technical skills overlap (with fuzzy matching)
  * Pillar 3: Constraints Fit (0%) — Location, remote, contract, salary compatibility
  * Pillar 4: Soft Skills Match (0%) — Behavioral and cultural fit, shown for context only
- * Pillar 5: Industry/Domain (10%) — Sector relevance
- * Pillar 6: Experience/Seniority (10%) — Professional depth
- * Pillar 7: Education Quality (10%) — Degree level, university prestige, grades
- * Pillar 8: Career Prestige (10%) — Previous employer reputation
+ * Pillar 5: Industry/Domain (5%) — Sector relevance
+ * Pillar 6: Education Quality (10%) — Degree level, university prestige, grades
+ * Pillar 7: Career Prestige (5%) — Previous employer reputation
  */
 export const calculateMatchScore = (job: JobProfile, candidate: CandidateProfile): MatchScoreBreakdown => {
     const candidateSkillPool = buildCandidateSkillPool(candidate);
 
-    // 1. Semantic Match (40%) — Embedding-led, structured-supported.
+    // 1. Semantic Match (50%) — Embedding-led, structured-supported.
     //
     // Logistic sigmoid spreads cosines across the full 0–100% scale instead of
     // compressing them into a narrow linear band. Calibrated for Gemini-2
@@ -1376,15 +1625,15 @@ export const calculateMatchScore = (job: JobProfile, candidate: CandidateProfile
 
     const structuredSemanticSignals = collectStructuredSemanticSignals(job, candidate, candidateSkillPool);
 
-    // Blend: embedding-led (60%) with stronger structured profile confirmation (40%).
-    // Embeddings still generalize well to unseen titles/domains, but structured
-    // evidence now matters more so real educational and career background can
-    // pull strong candidates up — and keep unrelated profiles down.
+    // Blend: structured evidence slightly outweighs the embedding.
+    // We still trust the embedding, but education, trajectory and proven role
+    // family now have more authority so "obvious" sector candidates climb and
+    // generic-but-well-written profiles stop floating too high.
     // When embedding is missing, structured semantic becomes the primary source
     // with only a small confidence discount.
     semanticScore = hasEmbedding
-        ? (rawEmbeddingSemanticScore * 0.6) + (structuredSemanticScore * 0.4)
-        : structuredSemanticScore * 0.9;
+        ? (rawEmbeddingSemanticScore * 0.45) + (structuredSemanticScore * 0.55)
+        : structuredSemanticScore * 0.92;
 
     // Agreement bonus — small, headroom-scaled so it can't create a top plateau.
     // A candidate at 0.95 gets at most +0.005; a candidate at 0.70 gets +0.025.
@@ -1397,7 +1646,7 @@ export const calculateMatchScore = (job: JobProfile, candidate: CandidateProfile
     // Low-cosine guard: when the embedding clearly says "unrelated", a structured
     // fluke (e.g. one accidental family-rule match) shouldn't pull the score above
     // the mid-band. Embeddings are harder to fool than text-pattern matches.
-    if (hasEmbedding && rawEmbeddingCosine < 0.50) {
+    if (hasEmbedding && rawEmbeddingCosine < 0.58) {
         semanticScore = Math.min(semanticScore, structuredSemanticSignals.hasSpecificFamilyTarget ? 0.34 : 0.40);
     }
 
@@ -1420,19 +1669,38 @@ export const calculateMatchScore = (job: JobProfile, candidate: CandidateProfile
         structuredSemanticSignals.experienceTrajectorySupport < 0.45;
 
     if (lacksEngineeringBackground) {
-        semanticScore = Math.min(semanticScore, 0.28);
+        semanticScore = Math.min(semanticScore, 0.20);
+    }
+
+    const incompatibleFamilyFit =
+        structuredSemanticSignals.hasSpecificFamilyTarget &&
+        structuredSemanticSignals.hasIncompatibleFamilyBackground &&
+        structuredSemanticSignals.directRoleAlignment < 0.60 &&
+        structuredSemanticSignals.familySupport < 0.50 &&
+        structuredSemanticSignals.trajectorySupport < 0.55 &&
+        structuredSemanticSignals.skillAnchorCoverage < 0.58;
+
+    if (incompatibleFamilyFit) {
+        semanticScore = Math.min(
+            semanticScore,
+            structuredSemanticSignals.hasEngineeringTarget ? 0.14 : 0.24
+        );
     }
 
     semanticScore = Math.min(1.0, Math.max(0, semanticScore));
 
-    // 2. Hard Skills Match (20%) — must-weighted, with fuzzy/synonym matching
+    // 2. Hard Skills Match (30%) — must-weighted, with fuzzy/synonym matching
     const hardSkillEval = evaluateHardSkills(job, candidate, candidateSkillPool);
-    const hardSkillsScore = hardSkillEval.hardSkillsScore;
+    const hasSameRoleExperience = hasProvenSimilarRoleExperience(job, candidate, structuredSemanticSignals);
+    let hardSkillsScore = hardSkillEval.hardSkillsScore;
+    if (hasSameRoleExperience && !hasExplicitHardSkillInventory(candidateSkillPool)) {
+        hardSkillsScore = Math.max(hardSkillsScore, 0.60);
+    }
 
     // 3. Constraints Fit (0%) — Location, Remote, Contract, Salary
     const constraintScore = calculateConstraintScore(job, candidate);
 
-    // 4. Industry/Domain Match (10%)
+    // 4. Industry/Domain Match (5%)
     let industryAlignment = 0;
     const jobFunctionLower = job.job_function?.toLowerCase() || '';
     const candFunctionLower = candidate.current_job_function?.toLowerCase() || '';
@@ -1468,7 +1736,18 @@ export const calculateMatchScore = (job: JobProfile, candidate: CandidateProfile
         candIndPrefs.includes(jobInd.toLowerCase())
     );
 
-    if (currentFunctionMatch) {
+    const hasIndustryEvidence =
+        Boolean(candFunctionLower) ||
+        targetFunctions.length > 0 ||
+        candidateIndustryExperience.length > 0 ||
+        Boolean(candText.trim()) ||
+        Boolean(candSummary.trim()) ||
+        Boolean(candidate.experiences?.length) ||
+        candIndPrefs.length > 0;
+
+    if (!hasIndustryEvidence) {
+        industryAlignment = 0;
+    } else if (currentFunctionMatch) {
         industryAlignment = 1.0;
     } else if (industryInStructuredExperience) {
         industryAlignment = 0.9;
@@ -1482,61 +1761,31 @@ export const calculateMatchScore = (job: JobProfile, candidate: CandidateProfile
     } else {
         industryAlignment = 0.15;
     }
+
+    if (hasSameRoleExperience) {
+        industryAlignment = Math.max(industryAlignment, 0.65);
+    }
     const industryScore = industryAlignment;
 
-    // 6. Seniority/Experience Match (10%)
-    const seniorityMap: Record<string, number> = { 'intern': 0, 'junior': 2, 'mid': 5, 'senior': 8, 'lead': 12 };
-    const jobMinYears = job.experience_required || seniorityMap[job.seniority_level || 'junior'] || 1;
-    const candYears = candidate.total_years_experience || 0;
+    // 5. Experience & Seniority removed from weighted ranking.
+    const experienceScore = 0;
 
-    let yearsScore: number;
-    if (candYears >= jobMinYears) {
-        yearsScore = 1.0;
-    } else if (candYears >= jobMinYears * 0.7) {
-        yearsScore = 0.7;
-    } else {
-        yearsScore = 0.4;
-    }
-
-    const SENIORITY_ORDER: Record<string, number> = {
-        'student': 0, 'intern': 1, 'junior': 2, 'mid': 3, 'senior': 4, 'lead': 5
-    };
-    const jobSenLevel = SENIORITY_ORDER[job.seniority_level?.toLowerCase() || ''] ?? -1;
-    const candSenLevel = SENIORITY_ORDER[candidate.current_seniority_level?.toLowerCase() || ''] ?? -1;
-
-    let seniorityScore = 0.5;
-    if (jobSenLevel !== -1 && candSenLevel !== -1) {
-        const diff = candSenLevel - jobSenLevel;
-        if (diff === 0) seniorityScore = 1.0;
-        else if (diff === 1) seniorityScore = 0.8;
-        else if (diff === -1) seniorityScore = 0.65;
-        else if (diff >= 2) seniorityScore = 0.40;
-        else seniorityScore = 0.30;
-    }
-
-    let testScore = 0.5;
-    const jobTestResult = candidate.test_results?.find(result => result.job_id === job.id && result.score != null);
-    if (jobTestResult?.score != null) {
-        testScore = Math.min(1.0, Math.max(0, jobTestResult.score / 100));
-    }
-
-    const experienceScore = (yearsScore * 0.45) + (seniorityScore * 0.35) + (testScore * 0.20);
-
-    // 7. Education Quality (10%)
+    // 6. Education Quality (10%)
     const educationScore = calculateEducationScore(job, candidate);
 
-    // 8. Career Prestige (10%)
-    const careerPrestigeScore = calculateCareerPrestigeScore(candidate);
+    // 7. Career Prestige (5%)
+    const careerPrestigeScore = calculateCareerPrestigeScore(job, candidate);
 
-    // Weighted score. Weights sum to 1.0; constraints are displayed but unweighted.
+    // Weighted score. Ranking weights are job-specific and normalized to 1.0.
+    const rankingWeights = normalizeMatchingPillarWeights(job.ranking_weights);
     const weights = {
-        semantic: 0.40,
-        hard: 0.20,
+        semantic: rankingWeights.semantic,
+        hard: rankingWeights.hard,
         constraint: 0.00,
-        industry: 0.10,
-        experience: 0.10,
-        education: 0.10,
-        careerPrestige: 0.10,
+        industry: rankingWeights.industry,
+        experience: 0.00,
+        education: rankingWeights.education,
+        careerPrestige: rankingWeights.careerPrestige,
     };
 
     const finalScore =
@@ -1559,5 +1808,7 @@ export const calculateMatchScore = (job: JobProfile, candidate: CandidateProfile
         constraintScore,
         educationScore,
         careerPrestigeScore,
+        weights: rankingWeights,
+        algorithm_version: MATCHING_ALGORITHM_VERSION,
     };
 };

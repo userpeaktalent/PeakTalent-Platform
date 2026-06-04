@@ -1,6 +1,9 @@
 import { BLANK_CANDIDATE_PROFILE, BLANK_RECRUITER_PROFILE } from '../constants';
 import { CandidateProfile, RecruiterProfile } from '../types';
 import { normalizeFullName } from '../utils/nameFormat';
+import { normalizeEducationEntries } from '../utils/education';
+import { logActivity } from './activityLogService';
+import { ensureLocalizedCandidateContent } from './dbService';
 import { createIsolatedSupabaseClient, isSupabaseConfigured, supabase } from './supabaseClient';
 
 export interface AdminAccount {
@@ -232,6 +235,19 @@ export const createSystemAdmin = async (
     await upsertAdminProfile(isolatedClient, data.user.id, normalizedEmail, fullName);
     await isolatedClient.auth.signOut();
 
+    void logActivity({
+        eventType: 'admin_created',
+        source: 'adminService',
+        purpose: 'admin_account_creation',
+        entityType: 'admin',
+        entityId: data.user.id,
+        entityLabel: normalizedEmail,
+        summary: `Created a new system admin for ${normalizedEmail}.`,
+        metadata: {
+            full_name: normalizeFullName(fullName) || 'System Administrator',
+        },
+    });
+
     return {
         id: data.user.id,
         email: normalizedEmail,
@@ -384,8 +400,9 @@ export const createSystemSeeker = async (
         },
         summary_text: trimValue(input.summaryText || cvProfile?.summary_text),
         experiences: ensureArray(cvProfile?.experiences),
-        education: ensureArray(cvProfile?.education),
+        education: normalizeEducationEntries(ensureArray(cvProfile?.education)),
     };
+    const localizedCandidate = await ensureLocalizedCandidateContent(candidate);
 
     const { error: profileError } = await isolatedClient.from('profiles').upsert({
         id: data.user.id,
@@ -399,9 +416,9 @@ export const createSystemSeeker = async (
     }
 
     const { error: candidateError } = await isolatedClient.from('candidates').upsert({
-        id: candidate.id,
+        id: localizedCandidate.id,
         user_id: data.user.id,
-        content: candidate,
+        content: localizedCandidate,
         embedding: null,
     });
 
@@ -410,6 +427,21 @@ export const createSystemSeeker = async (
     }
 
     await isolatedClient.auth.signOut();
+
+    void logActivity({
+        eventType: 'candidate_profile_created',
+        source: 'adminService',
+        purpose: 'candidate_provisioning',
+        entityType: 'candidate',
+        entityId: candidate.id,
+        entityLabel: fullName,
+        summary: `Provisioned seeker profile for ${fullName}.`,
+        metadata: {
+            email: normalizedEmail,
+            current_job_function: candidate.current_job_function || null,
+            current_seniority_level: candidate.current_seniority_level || null,
+        },
+    });
 
     return {
         id: data.user.id,
@@ -493,6 +525,21 @@ export const createSystemRecruiter = async (
 
     await isolatedClient.auth.signOut();
 
+    void logActivity({
+        eventType: 'recruiter_created',
+        source: 'adminService',
+        purpose: 'recruiter_provisioning',
+        entityType: 'recruiter',
+        entityId: recruiter.id,
+        entityLabel: recruiter.company_name || fullName,
+        summary: `Provisioned recruiter account for ${fullName}.`,
+        metadata: {
+            email: normalizedEmail,
+            recruiter_role: recruiter.role || null,
+            company_name: recruiter.company_name || null,
+        },
+    });
+
     return {
         id: data.user.id,
         role: 'recruiter',
@@ -503,4 +550,102 @@ export const createSystemRecruiter = async (
         lineTwo: [recruiter.role, recruiter.company_location.city, recruiter.company_location.country?.toUpperCase()].filter(Boolean).join(' • '),
         createdAt: new Date().toISOString(),
     };
+};
+
+export const resetUserPassword = async (
+    userId: string,
+    newPassword: string
+): Promise<void> => {
+    if (!isSupabaseConfigured) {
+        throw new Error('Supabase is not configured. Check your local environment variables first.');
+    }
+
+    const { data, error } = await supabase.rpc('reset_user_password', {
+        p_user_id: userId,
+        p_new_password: newPassword,
+    });
+
+    if (error) {
+        const message = `${error.message || ''} ${error.details || ''}`.trim();
+        if (error.code === '42883' || message.includes('reset_user_password')) {
+            throw new Error("RPC Missing. Please run 'reset_user_password.sql' in Supabase SQL Editor to create this RPC.");
+        }
+        throw error;
+    }
+
+    if ((data as any)?.status === 'error') {
+        throw new Error((data as any).message || 'Unable to reset the user password.');
+    }
+
+    void logActivity({
+        eventType: 'password_reset',
+        source: 'adminService',
+        purpose: 'admin_password_reset',
+        entityType: 'user',
+        entityId: userId,
+        entityLabel: userId,
+        summary: `Admin reset password for user ${userId}.`,
+    });
+};
+
+export const markUserMustChangePassword = async (
+    userId: string,
+    userType: 'candidate' | 'recruiter',
+    mustChangePassword = true,
+): Promise<void> => {
+    if (!isSupabaseConfigured) {
+        throw new Error('Supabase is not configured. Check your local environment variables first.');
+    }
+
+    const tableName = userType === 'recruiter' ? 'recruiters' : 'candidates';
+    const entityType = userType === 'recruiter' ? 'recruiter' : 'candidate';
+
+    const { data: directData, error: directError } = await supabase
+        .from(tableName)
+        .select('content')
+        .eq('id', userId)
+        .maybeSingle();
+
+    let entityContent = (directData?.content as RecruiterProfile | CandidateProfile | undefined) ?? null;
+
+    if (!entityContent || directError) {
+        const { data: rpcData, error: rpcError } = await supabase.rpc('get_debug_data');
+        if (rpcError) {
+            throw rpcError;
+        }
+
+        const collectionKey = userType === 'recruiter' ? 'recruiters' : 'candidates';
+        const match = (((rpcData as any)?.[collectionKey] || []) as any[]).find(
+            (row) => row?.id === userId || row?.content?.id === userId,
+        );
+
+        entityContent = (match?.content as RecruiterProfile | CandidateProfile | undefined) ?? null;
+    }
+
+    if (!entityContent) {
+        throw new Error(`Unable to find the ${userType} profile to update the password policy.`);
+    }
+
+    const nextContent = {
+        ...entityContent,
+        must_change_password: mustChangePassword,
+    };
+
+    const { data, error } = await supabase.rpc('update_debug_entity', {
+        p_type: entityType,
+        p_id: userId,
+        p_content: nextContent,
+    });
+
+    if (error) {
+        const message = `${error.message || ''} ${error.details || ''}`.trim();
+        if (error.code === '42883' || message.includes('update_debug_entity')) {
+            throw new Error("RPC Missing. Please run 'debug_rpc.sql' in Supabase SQL Editor.");
+        }
+        throw error;
+    }
+
+    if ((data as any)?.status === 'error') {
+        throw new Error((data as any).message || 'Unable to update the password policy for this user.');
+    }
 };

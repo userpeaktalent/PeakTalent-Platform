@@ -6,8 +6,31 @@ import { CitySelect } from './CitySelect';
 import { LanguageSelect } from './LanguageSelect';
 import { SectorSelect } from './SectorSelect';
 import { SKILL_LEVELS, getSkillLevelLabel } from '../utils/skills';
-import { EDUCATION_LEVELS } from '../utils/education';
+import { EDUCATION_LEVELS, getEducationLevelLabel } from '../utils/education';
 import { useLanguage } from './LanguageProvider';
+
+const EXPERIENCE_REQUIREMENT_OPTIONS = [
+    { value: 0, labelEn: 'No minimum', labelIt: 'Nessuna' },
+    { value: 2, labelEn: '2 years+', labelIt: '2 anni+' },
+    { value: 5, labelEn: '5 years+', labelIt: '5 anni+' },
+    { value: 7, labelEn: '7 years+', labelIt: '7 anni+' },
+    { value: 10, labelEn: '10 years+', labelIt: '10 anni+' },
+    { value: 15, labelEn: '15 years+', labelIt: '15 anni+' },
+];
+
+const normalizeExperienceRequirement = (value?: number | string | null) => {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue) || numericValue <= 0) return 0;
+
+    return EXPERIENCE_REQUIREMENT_OPTIONS.reduce((closest, option) => {
+        const currentDistance = Math.abs(option.value - numericValue);
+        const closestDistance = Math.abs(closest.value - numericValue);
+
+        if (currentDistance < closestDistance) return option;
+        if (currentDistance === closestDistance && option.value > closest.value) return option;
+        return closest;
+    }).value;
+};
 
 // --- Helper Components ---
 
@@ -112,9 +135,11 @@ interface JobProfileFormProps {
 }
 
 const JobProfileForm: React.FC<JobProfileFormProps> = ({ initialData, onSubmit }) => {
-    const { text } = useLanguage();
+    const { text, language } = useLanguage();
     const [job, setJob] = useState<JobProfile>({
         ...initialData,
+        requires_quiz: initialData.requires_quiz ?? false,
+        experience_required: normalizeExperienceRequirement(initialData.experience_required),
         constraints: initialData.constraints || { contract_type: 'full_time', location: { country: '', city: '' }, remote: 'none' },
         skills: initialData.skills || [],
         it_skills: initialData.it_skills || [],
@@ -154,7 +179,11 @@ const JobProfileForm: React.FC<JobProfileFormProps> = ({ initialData, onSubmit }
         } else {
             setJob(prev => ({
                 ...prev,
-                [name]: type === 'checkbox' ? (e.target as HTMLInputElement).checked : value
+                [name]: name === 'experience_required'
+                    ? normalizeExperienceRequirement(value)
+                    : type === 'checkbox'
+                        ? (e.target as HTMLInputElement).checked
+                        : value
             }));
         }
     };
@@ -226,7 +255,11 @@ const JobProfileForm: React.FC<JobProfileFormProps> = ({ initialData, onSubmit }
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        onSubmit(job);
+        onSubmit({
+            ...job,
+            requires_quiz: Boolean(job.requires_quiz),
+            technical_test: job.requires_quiz ? job.technical_test : undefined,
+        });
     };
 
     return (
@@ -251,11 +284,17 @@ const JobProfileForm: React.FC<JobProfileFormProps> = ({ initialData, onSubmit }
                         <option value="senior">{text('Senior', 'Senior')}</option>
                         <option value="lead">{text('Lead', 'Lead')}</option>
                     </FormSelect>
-                    <FormInput label={text('Years Experience Required', 'Anni di esperienza richiesti')} id="exp_req" type="number" name="experience_required" value={job.experience_required} onChange={handleChange} />
-                    <FormSelect label={text('Minimum Education', 'Formazione minima')} id="min_education_level" name="constraints.min_education_level" value={job.constraints.min_education_level || ''} onChange={handleChange}>
+                    <FormSelect label={text('Minimum work experience', 'Esperienza lavorativa minima')} id="exp_req" name="experience_required" value={normalizeExperienceRequirement(job.experience_required)} onChange={handleChange}>
+                        {EXPERIENCE_REQUIREMENT_OPTIONS.map(option => (
+                            <option key={option.value} value={option.value}>
+                                {text(option.labelEn, option.labelIt)}
+                            </option>
+                        ))}
+                    </FormSelect>
+                    <FormSelect label={text('Minimum education level', 'Livello istruzione minimo')} id="min_education_level" name="constraints.min_education_level" value={job.constraints.min_education_level || ''} onChange={handleChange}>
                         <option value="">{text('No minimum', 'Nessun minimo')}</option>
                         {EDUCATION_LEVELS.map(level => (
-                            <option key={level.code} value={level.code}>{level.name}</option>
+                            <option key={level.code} value={level.code}>{getEducationLevelLabel(level.code, language)}</option>
                         ))}
                     </FormSelect>
                 </div>
@@ -400,7 +439,7 @@ const JobProfileForm: React.FC<JobProfileFormProps> = ({ initialData, onSubmit }
             </SectionAccordion>
 
             <div className="text-center mt-8">
-                <button type="submit" className="w-full max-w-xs bg-gradient-to-r from-orange-500 to-amber-500 text-white font-semibold py-3 px-6 rounded-lg shadow-md hover:shadow-lg hover:-translate-y-0.5 transform transition-all duration-300">
+                <button type="submit" className="w-full max-w-xs bg-gradient-to-r from-orange-500 to-amber-500 text-white font-semibold py-3 px-6 rounded-lg shadow-md hover:shadow-lg transform transition-all duration-300">
                     {text('Confirm & Continue', 'Conferma e continua')}
                 </button>
             </div>

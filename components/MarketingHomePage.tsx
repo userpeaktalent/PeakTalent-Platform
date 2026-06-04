@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useLanguage } from './LanguageProvider';
 
 type MarketingHomePageProps = {
@@ -36,7 +37,9 @@ type IconName =
   | 'layers'
   | 'factory'
   | 'badge'
-  | 'mail';
+  | 'mail'
+  | 'linkedin'
+  | 'facebook';
 
 type FeatureCard = {
   title: string;
@@ -79,8 +82,6 @@ type BeliefCard = {
 };
 
 const demoHref = 'mailto:info@peaktalent.it?subject=Richiesta%20Demo%20PeakTalent&body=Buongiorno%2C%0A%0ASono%20interessato%2Fa%20a%20richiedere%20una%20demo%20della%20piattaforma%20PeakTalent.%0A%0ANome%3A%20%0AAzienda%3A%20%0ARuolo%3A%20%0ATelefono%3A%20%0A%0AGrazie%2C%0A';
-const privacyPolicyHref = 'https://www.iubenda.com/privacy-policy/84841902';
-const cookiePolicyHref = 'https://www.iubenda.com/privacy-policy/84841902/cookie-policy';
 const contactHref = 'mailto:info@peaktalent.it';
 
 const challengeCards: FeatureCard[] = [
@@ -297,6 +298,10 @@ const Icon: React.FC<{ name: IconName; className?: string }> = ({ name, classNam
       return <svg {...shared}><circle cx="12" cy="8" r="6" /><path d="M15.477 12.89 17 22l-5-3-5 3 1.523-9.11" /></svg>;
     case 'mail':
       return <svg {...shared}><path d="M4 6h16v12H4z" /><path d="M4 8l8 6 8-6" /></svg>;
+    case 'linkedin':
+      return <svg {...shared}><path d="M16 8a6 6 0 016 6v7h-4v-7a2 2 0 00-2-2 2 2 0 00-2 2v7h-4v-7a6 6 0 016-6zM2 9h4v12H2z" /><circle cx="4" cy="4" r="2" /></svg>;
+    case 'facebook':
+      return <svg {...shared}><path d="M18 2h-3a5 5 0 00-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 011-1h3z" /></svg>;
     default:
       return <svg {...shared}><circle cx="12" cy="12" r="9" /></svg>;
   }
@@ -491,7 +496,7 @@ const MarketingHomePage: React.FC<MarketingHomePageProps> = ({ onEnterPlatform, 
             <button
               type="button"
               onClick={onEnterPlatform}
-              className="inline-flex items-center gap-2 whitespace-nowrap rounded-xl bg-[#ff7a1a] px-4 py-1.5 text-sm font-semibold text-white shadow-[0_10px_30px_rgba(249,115,22,0.24)] transition hover:-translate-y-0.5 hover:bg-[#f26a07] xl:px-5 xl:py-2"
+              className="inline-flex items-center gap-2 whitespace-nowrap rounded-xl bg-[#ff7a1a] px-4 py-1.5 text-sm font-semibold text-white shadow-[0_10px_30px_rgba(249,115,22,0.24)] transition hover:bg-[#f26a07] xl:px-5 xl:py-2"
             >
               {text('Get Started', 'Inizia Ora')}
               <Icon name="arrow-right" className="h-4 w-4" />
@@ -556,7 +561,7 @@ const MarketingHomePage: React.FC<MarketingHomePageProps> = ({ onEnterPlatform, 
       <main className="min-h-screen">
         <section id="hero" className="relative flex min-h-screen items-start justify-center overflow-hidden pt-24 sm:pt-28 lg:pt-28 xl:items-center xl:pt-20">
           <div className="absolute inset-0">
-            <img src="/marketing/why-us-photo.png" alt="Recruiting digitale e valutazione AI dei candidati con PeakTalent." className="marketing-hero-image h-full w-full object-cover object-top" loading="eager" />
+            <img src="/marketing/why-us-photo.webp" alt="Recruiting digitale e valutazione AI dei candidati con PeakTalent." className="marketing-hero-image h-full w-full object-cover object-top" loading="eager" fetchPriority="high" decoding="async" width="1500" height="844" />
             <div className="absolute inset-0 bg-slate-950/65" />
           </div>
 
@@ -589,7 +594,7 @@ const MarketingHomePage: React.FC<MarketingHomePageProps> = ({ onEnterPlatform, 
                 <div className="flex flex-col items-center gap-4">
                   <a
                     href={demoHref}
-                    className="inline-flex items-center gap-2 rounded-xl bg-[#ff7a1a] px-7 py-3.5 text-base font-semibold text-white shadow-[0_14px_36px_rgba(249,115,22,0.35)] transition hover:-translate-y-0.5 hover:bg-[#f26a07] sm:px-8 sm:py-4 sm:text-lg"
+                    className="inline-flex items-center gap-2 rounded-xl bg-[#ff7a1a] px-7 py-3.5 text-base font-semibold text-white shadow-[0_14px_36px_rgba(249,115,22,0.35)] transition hover:bg-[#f26a07] sm:px-8 sm:py-4 sm:text-lg"
                   >
                     {text('Request a Demo', 'Richiedi una Demo')}
                     <Icon name="arrow-right" className="h-5 w-5" />
@@ -597,7 +602,7 @@ const MarketingHomePage: React.FC<MarketingHomePageProps> = ({ onEnterPlatform, 
                   <button
                     type="button"
                     onClick={onLogin}
-                    className="inline-flex items-center justify-center rounded-xl bg-white px-6 py-2 text-sm font-semibold text-slate-900 shadow-sm transition hover:-translate-y-0.5 hover:bg-slate-100"
+                    className="inline-flex items-center justify-center rounded-xl bg-white px-6 py-2 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-slate-100"
                   >
                     Accedi alla piattaforma
                   </button>
@@ -629,7 +634,7 @@ const MarketingHomePage: React.FC<MarketingHomePageProps> = ({ onEnterPlatform, 
             <div className="mx-auto grid max-w-5xl gap-6 md:auto-rows-fr md:grid-cols-2">
               {challengeCards.map((card, index) => (
                 <Reveal key={card.title} className="h-full" delay={index * 90}>
-                  <article className="marketing-card group flex h-full rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_2px_8px_rgba(15,23,42,0.04),0_12px_28px_rgba(15,23,42,0.08)] transition duration-300 hover:-translate-y-1 hover:shadow-[0_8px_32px_rgba(15,23,42,0.12)] md:p-8">
+                  <article className="marketing-card group flex h-full rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_2px_8px_rgba(15,23,42,0.04),0_12px_28px_rgba(15,23,42,0.08)] transition duration-300 hover:shadow-[0_8px_32px_rgba(15,23,42,0.12)] md:p-8">
                     <div className="flex items-start gap-4">
                       <div className={`shrink-0 rounded-2xl p-3 ${card.bgClass} ${card.colorClass}`}>
                         <Icon name={card.icon} className="h-6 w-6" />
@@ -660,7 +665,7 @@ const MarketingHomePage: React.FC<MarketingHomePageProps> = ({ onEnterPlatform, 
             <div className="mx-auto grid max-w-6xl gap-8 md:auto-rows-fr md:grid-cols-2">
               {solutionCards.map((card, index) => (
                 <Reveal key={card.title} className="h-full" delay={index * 110} direction={index % 2 === 0 ? 'up' : 'zoom'}>
-                  <article className="marketing-card-glow flex h-full flex-col rounded-3xl border border-orange-100 bg-white p-8 shadow-[0_2px_8px_rgba(15,23,42,0.04),0_12px_32px_rgba(249,115,22,0.16)] transition duration-300 hover:scale-[1.02]">
+                  <article className="marketing-card-glow flex h-full flex-col rounded-3xl border border-orange-100 bg-white p-8 shadow-[0_2px_8px_rgba(15,23,42,0.04),0_12px_32px_rgba(249,115,22,0.16)] transition duration-300">
                     <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-[#ff7a1a] text-white shadow-[0_4px_14px_rgba(249,115,22,0.35)]">
                       <Icon name={card.icon} className="h-8 w-8" />
                     </div>
@@ -785,10 +790,13 @@ const MarketingHomePage: React.FC<MarketingHomePageProps> = ({ onEnterPlatform, 
             <div className="relative mx-auto max-w-5xl">
               <Reveal className="overflow-hidden rounded-3xl" direction="zoom">
                 <img
-                  src="/marketing/hero-candidate.png"
+                  src="/marketing/hero-candidate.webp"
                   alt="Professionista in un contesto di recruiting digitale e curriculum valutato con AI."
                   className="h-auto w-full rounded-3xl object-cover md:min-h-[500px]"
                   loading="lazy"
+                  decoding="async"
+                  width="1500"
+                  height="844"
                 />
               </Reveal>
 
@@ -823,7 +831,7 @@ const MarketingHomePage: React.FC<MarketingHomePageProps> = ({ onEnterPlatform, 
               <div className="flex justify-center">
                 <a
                   href={demoHref}
-                  className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-white px-8 py-4 text-lg font-semibold text-[#ff7a1a] shadow-[0_14px_36px_rgba(15,23,42,0.16)] transition hover:-translate-y-0.5 sm:w-auto"
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-white px-8 py-4 text-lg font-semibold text-[#ff7a1a] shadow-[0_14px_36px_rgba(15,23,42,0.16)] transition sm:w-auto"
                 >
                   Richiedi una Demo
                   <Icon name="arrow-right" className="h-5 w-5" />
@@ -850,6 +858,24 @@ const MarketingHomePage: React.FC<MarketingHomePageProps> = ({ onEnterPlatform, 
                 >
                   <Icon name="mail" className="h-5 w-5" />
                 </a>
+                <a
+                  href="https://www.linkedin.com/company/pktalent/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10 transition-colors hover:bg-white/20"
+                  aria-label="LinkedIn"
+                >
+                  <Icon name="linkedin" className="h-5 w-5" />
+                </a>
+                <a
+                  href="https://www.facebook.com/PeakTalent"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10 transition-colors hover:bg-white/20"
+                  aria-label="Facebook"
+                >
+                  <Icon name="facebook" className="h-5 w-5" />
+                </a>
               </div>
             </div>
 
@@ -875,20 +901,27 @@ const MarketingHomePage: React.FC<MarketingHomePageProps> = ({ onEnterPlatform, 
           <div className="flex flex-col items-center justify-between gap-4 border-t border-white/20 pt-8 md:flex-row">
             <p className="text-sm text-white/50">© {year} PeakTalent. Tutti i diritti riservati.</p>
             <div className="flex gap-6 text-sm text-white/50">
-              <a
-                href={privacyPolicyHref}
-                className="iubenda-white iubenda-noiframe iubenda-embed transition-colors hover:text-white"
+              <Link
+                to="/privacy-policy"
+                className="transition-colors hover:text-white"
                 title="Privacy Policy"
               >
                 Privacy Policy
-              </a>
-              <a
-                href={cookiePolicyHref}
-                className="iubenda-white iubenda-noiframe iubenda-embed transition-colors hover:text-white"
+              </Link>
+              <Link
+                to="/cookie-policy"
+                className="transition-colors hover:text-white"
                 title="Cookie Policy"
               >
                 Cookie Policy
-              </a>
+              </Link>
+              <Link
+                to="/terms"
+                className="transition-colors hover:text-white"
+                title="Termini e Condizioni"
+              >
+                Termini e Condizioni
+              </Link>
             </div>
           </div>
         </div>

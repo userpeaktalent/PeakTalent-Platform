@@ -1,15 +1,19 @@
 import React, { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { RecruiterProfile } from '../types';
 import RecruiterProfileSetup from './RecruiterProfileSetup';
 import { useLanguage } from './LanguageProvider';
 import { supabase } from '../services/supabaseClient';
+import { clearPendingPasswordRecovery } from '../services/passwordRecoveryService';
 import { addRecruiter } from '../services/dbService';
 import { useAuth } from './AuthProvider';
+import PasskeySecurityPanel from './PasskeySecurityPanel';
 
 const UserIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clipRule="evenodd" /></svg>;
 const BellIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-3-3h6a3 3 0 01-3 3z" /></svg>;
 const LockIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2V7a3 3 0 00-6 0v2h6z" clipRule="evenodd" /></svg>;
 const OfficeIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a1 1 0 00-1 1v1H6a2 2 0 00-2 2v11a1 1 0 102 0v-1h8v1a1 1 0 102 0V6a2 2 0 00-2-2h-3V3a1 1 0 00-1-1zM8 7h1v2H8V7zm3 0h1v2h-1V7zM8 11h1v2H8v-2zm3 0h1v2h-1v-2z" /></svg>;
+const ArchiveIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path d="M4 3a2 2 0 00-2 2v1a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4z" /><path fillRule="evenodd" d="M3 9h14v5a3 3 0 01-3 3H6a3 3 0 01-3-3V9zm5 2a1 1 0 100 2h4a1 1 0 100-2H8z" clipRule="evenodd" /></svg>;
 const LogoutIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V5h10a1 1 0 100-2H3zm12.293 4.293a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 01-1.414-1.414L17.586 12H10a1 1 0 110-2h7.586l-2.293-2.293a1 1 0 010-1.414z" clipRule="evenodd" /></svg>;
 
 export type RecruiterSettingsTab = 'profile' | 'notifications' | 'security' | 'company';
@@ -19,6 +23,7 @@ interface RecruiterSettingsPageProps {
   onUpdateProfile: (profile: RecruiterProfile) => void;
   onBack: () => void;
   onLogout: () => void;
+  onOpenJobArchive: () => void;
   initialTab?: RecruiterSettingsTab;
   requirePasswordChange?: boolean;
 }
@@ -46,12 +51,14 @@ const RecruiterSettingsPage: React.FC<RecruiterSettingsPageProps> = ({
   onUpdateProfile,
   onBack,
   onLogout,
+  onOpenJobArchive,
   initialTab = 'profile',
   requirePasswordChange = false,
 }) => {
   const { text } = useLanguage();
   const { isImpersonating } = useAuth();
-  const [activeTab, setActiveTab] = useState<RecruiterSettingsTab>(initialTab);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState<RecruiterSettingsTab>(searchParams.get('tab') as RecruiterSettingsTab || initialTab);
   const [companyVisible, setCompanyVisible] = useState(recruiter.company_visibility ?? true);
   const [isSavingCompanyVisibility, setIsSavingCompanyVisibility] = useState(false);
   const [companyFeedback, setCompanyFeedback] = useState<{ error: string; success: string }>({ error: '', success: '' });
@@ -63,8 +70,19 @@ const RecruiterSettingsPage: React.FC<RecruiterSettingsPageProps> = ({
   const [isSavingPassword, setIsSavingPassword] = useState(false);
 
   useEffect(() => {
-    setActiveTab(requirePasswordChange ? 'security' : initialTab);
-  }, [initialTab, requirePasswordChange]);
+    const searchTab = searchParams.get('tab') as RecruiterSettingsTab | null;
+    setActiveTab(requirePasswordChange ? 'security' : (searchTab || initialTab));
+  }, [initialTab, requirePasswordChange, searchParams]);
+
+  const handleTabChange = (tab: RecruiterSettingsTab) => {
+    if (requirePasswordChange && tab !== 'security') {
+      return;
+    }
+    setActiveTab(tab);
+    const nextSearchParams = new URLSearchParams(searchParams);
+    nextSearchParams.set('tab', tab);
+    setSearchParams(nextSearchParams, { replace: true });
+  };
 
   useEffect(() => {
     setCompanyVisible(recruiter.company_visibility ?? true);
@@ -114,6 +132,13 @@ const RecruiterSettingsPage: React.FC<RecruiterSettingsPageProps> = ({
         nextRecruiter = { ...recruiter, must_change_password: false };
         await addRecruiter(nextRecruiter);
         onUpdateProfile(nextRecruiter);
+      }
+
+      if (requirePasswordChange) {
+        clearPendingPasswordRecovery();
+        const nextSearchParams = new URLSearchParams(searchParams);
+        nextSearchParams.delete('forcePasswordChange');
+        setSearchParams(nextSearchParams, { replace: true });
       }
 
       setPasswordForm({ nextPassword: '', confirmPassword: '' });
@@ -223,6 +248,14 @@ const RecruiterSettingsPage: React.FC<RecruiterSettingsPageProps> = ({
               >
                 {isSavingPassword ? text('Updating password...', 'Aggiornamento password...') : text('Change Password', 'Cambia password')}
               </button>
+
+              <PasskeySecurityPanel
+                disabled={isImpersonating}
+                disabledReason={text(
+                  'Passkey management is disabled while admin impersonation is active.',
+                  'La gestione passkey è disattivata durante l’impersonazione admin.'
+                )}
+              />
             </div>
           </SectionCard>
         );
@@ -324,7 +357,7 @@ const RecruiterSettingsPage: React.FC<RecruiterSettingsPageProps> = ({
   return (
     <div className="mx-auto max-w-[1600px] animate-fade-in px-3 pb-20 pt-2.5 sm:px-8 lg:px-10">
       <div className="mb-5">
-        <button onClick={onBack} className="mb-4 inline-flex items-center gap-1 text-sm font-medium text-slate-500 transition-colors hover:text-orange-600 dark:text-slate-400 dark:hover:text-orange-400">
+        <button onClick={() => { if (!requirePasswordChange) onBack(); }} disabled={requirePasswordChange} className="mb-4 inline-flex items-center gap-1 text-sm font-medium text-slate-500 transition-colors hover:text-orange-600 disabled:cursor-not-allowed disabled:opacity-40 dark:text-slate-400 dark:hover:text-orange-400">
           <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
           {text('Back', 'Indietro')}
         </button>
@@ -334,10 +367,11 @@ const RecruiterSettingsPage: React.FC<RecruiterSettingsPageProps> = ({
         <aside className="self-start lg:sticky lg:top-28">
           <div className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950">
             <nav className="space-y-1">
-              <NavButton icon={<UserIcon />} label={text('Company Profile', 'Profilo azienda')} onClick={() => setActiveTab('profile')} isActive={activeTab === 'profile'} />
-              <NavButton icon={<BellIcon />} label={text('Notifications', 'Notifiche')} onClick={() => setActiveTab('notifications')} isActive={activeTab === 'notifications'} />
-              <NavButton icon={<LockIcon />} label={text('Security', 'Sicurezza')} onClick={() => setActiveTab('security')} isActive={activeTab === 'security'} />
-              <NavButton icon={<OfficeIcon />} label={text('Company Presence', 'Presenza azienda')} onClick={() => setActiveTab('company')} isActive={activeTab === 'company'} />
+              <NavButton icon={<UserIcon />} label={text('Company Profile', 'Profilo azienda')} onClick={() => handleTabChange('profile')} isActive={activeTab === 'profile'} />
+              <NavButton icon={<BellIcon />} label={text('Notifications', 'Notifiche')} onClick={() => handleTabChange('notifications')} isActive={activeTab === 'notifications'} />
+              <NavButton icon={<LockIcon />} label={text('Security', 'Sicurezza')} onClick={() => handleTabChange('security')} isActive={activeTab === 'security'} />
+              <NavButton icon={<OfficeIcon />} label={text('Company Presence', 'Presenza azienda')} onClick={() => handleTabChange('company')} isActive={activeTab === 'company'} />
+              <NavButton icon={<ArchiveIcon />} label={text('Job archive', 'Archivio lavori')} onClick={() => { if (!requirePasswordChange) onOpenJobArchive(); }} />
 
               <hr className="my-3 border-slate-200 dark:border-slate-800" />
 

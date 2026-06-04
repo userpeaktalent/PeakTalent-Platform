@@ -24,6 +24,7 @@ export const LanguageSelect: React.FC<LanguageSelectProps> = ({
     const { text } = useLanguage();
     const [isOpen, setIsOpen] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
+    const [useNativeSelect, setUseNativeSelect] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
 
@@ -38,17 +39,42 @@ export const LanguageSelect: React.FC<LanguageSelectProps> = ({
     );
 
     useEffect(() => {
-        const handleClickOutside = (event: MouseEvent) => {
+        const handleClickOutside = (event: PointerEvent | MouseEvent) => {
             if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
                 setIsOpen(false);
                 setSearchTerm('');
             }
         };
 
-        document.addEventListener('mousedown', handleClickOutside);
+        const eventName = typeof window !== 'undefined' && 'PointerEvent' in window ? 'pointerdown' : 'mousedown';
+        document.addEventListener(eventName, handleClickOutside as EventListener);
         return () => {
-            document.removeEventListener('mousedown', handleClickOutside);
+            document.removeEventListener(eventName, handleClickOutside as EventListener);
         };
+    }, []);
+
+    useEffect(() => {
+        if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+
+        const mediaQuery = window.matchMedia('(pointer: coarse), (max-width: 767px)');
+        const syncMode = (matches: boolean) => {
+            setUseNativeSelect(matches);
+            if (matches) {
+                setIsOpen(false);
+                setSearchTerm('');
+            }
+        };
+
+        syncMode(mediaQuery.matches);
+
+        const handleChange = (event: MediaQueryListEvent) => syncMode(event.matches);
+        if (typeof mediaQuery.addEventListener === 'function') {
+            mediaQuery.addEventListener('change', handleChange);
+            return () => mediaQuery.removeEventListener('change', handleChange);
+        }
+
+        mediaQuery.addListener(handleChange);
+        return () => mediaQuery.removeListener(handleChange);
     }, []);
 
     const handleSelect = (code: string) => {
@@ -57,8 +83,33 @@ export const LanguageSelect: React.FC<LanguageSelectProps> = ({
         setSearchTerm('');
     };
 
+    if (useNativeSelect) {
+        return (
+            <div className="relative w-full space-y-1" ref={containerRef}>
+                <label htmlFor={id} className="block min-h-5 text-sm font-medium leading-5 text-slate-700 dark:text-slate-300">
+                    {label} {required && <span className="text-red-500">*</span>}
+                </label>
+                <select
+                    id={id}
+                    name={name || id}
+                    value={value}
+                    onChange={(e) => onChange({ target: { name: name || id, value: e.target.value } })}
+                    className="mt-1 block h-12 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-slate-900 shadow-sm transition-shadow duration-200 focus:border-orange-500 focus:outline-none focus:ring-2 focus:ring-orange-500 dark:border-slate-600 dark:bg-slate-700 dark:text-white"
+                    required={required}
+                >
+                    <option value="">{text(placeholder, 'Seleziona una lingua...')}</option>
+                    {languages.map((lang) => (
+                        <option key={lang.code} value={lang.code}>
+                            {lang.flag} {lang.name}
+                        </option>
+                    ))}
+                </select>
+            </div>
+        );
+    }
+
     return (
-        <div className="space-y-1 relative" ref={containerRef}>
+        <div className="relative w-full space-y-1" ref={containerRef}>
             <label htmlFor={id} className="block min-h-5 text-sm font-medium leading-5 text-slate-700 dark:text-slate-300">
                 {label} {required && <span className="text-red-500">*</span>}
             </label>
