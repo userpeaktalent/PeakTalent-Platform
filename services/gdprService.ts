@@ -49,16 +49,16 @@ export const deleteAiInterviewData = async (candidate: Pick<CandidateProfile, 'i
   let { data: candidateRow, error: candidateReadError } = await supabase
     .from('candidates')
     .select('id, content')
-    .eq('id', candidate.id)
+    .eq('user_id', profileId)
     .maybeSingle();
 
   if (candidateReadError) throw candidateReadError;
 
-  if (!candidateRow && candidate.id !== profileId) {
+  if (!candidateRow && candidate.id) {
     const fallbackResult = await supabase
       .from('candidates')
       .select('id, content')
-      .eq('user_id', profileId)
+      .eq('id', candidate.id)
       .maybeSingle();
 
     if (fallbackResult.error) throw fallbackResult.error;
