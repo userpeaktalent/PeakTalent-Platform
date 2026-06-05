@@ -36,6 +36,13 @@ export const deleteAiInterviewData = async (candidate: Pick<CandidateProfile, 'i
   const profileId = authData?.user?.id;
   if (!profileId) throw new Error('Not authenticated');
 
+  const { data: chatRows, error: chatReadError } = await supabase
+    .from('candidate_refinement_chats')
+    .select('candidate_record_id')
+    .eq('candidate_profile_id', profileId);
+
+  if (chatReadError) throw chatReadError;
+
   // Delete the chat transcript rows
   const { error: chatError } = await supabase
     .from('candidate_refinement_chats')
@@ -46,42 +53,51 @@ export const deleteAiInterviewData = async (candidate: Pick<CandidateProfile, 'i
 
   // Reset AI refinement metadata inside candidates.content. The candidates table
   // stores profile fields as JSON, not as top-level ai_refined columns.
-  let { data: candidateRow, error: candidateReadError } = await supabase
-    .from('candidates')
-    .select('id, content')
-    .eq('user_id', profileId)
-    .maybeSingle();
-
-  if (candidateReadError) throw candidateReadError;
-
-  if (!candidateRow && candidate.id) {
-    const fallbackResult = await supabase
-      .from('candidates')
-      .select('id, content')
-      .eq('id', candidate.id)
-      .maybeSingle();
-
-    if (fallbackResult.error) throw fallbackResult.error;
-    candidateRow = fallbackResult.data;
-  }
-
-  if (!candidateRow?.id) {
-    throw new Error('Candidate profile could not be found while resetting AI refinement status.');
-  }
-
   const nextContent = {
-    ...((candidateRow.content || {}) as CandidateProfile),
-    id: ((candidateRow.content || {}) as CandidateProfile).id || candidateRow.id,
+    ...(candidate as CandidateProfile),
     ai_refined: false,
     ai_refined_at: null,
   };
 
-  const { error: candidateError } = await supabase
-    .from('candidates')
-    .update({ content: nextContent })
-    .eq('id', candidateRow.id);
+  const candidateIds = Array.from(new Set([
+    profileId,
+    candidate.id,
+    ...((chatRows || []) as Array<{ candidate_record_id?: string | null }>)
+      .map((row) => row.candidate_record_id),
+  ]
+    .map((value) => (typeof value === 'string' ? value.trim() : ''))
+    .filter(Boolean)));
 
-  if (candidateError) throw candidateError;
+  let resetCount = 0;
+
+  const resetByColumn = async (column: string, value: string): Promise<number> => {
+    const { error, count } = await supabase
+      .from('candidates')
+      .update({ content: nextContent }, { count: 'exact' })
+      .eq(column, value);
+
+    if (error) throw error;
+    return count || 0;
+  };
+
+  resetCount += await resetByColumn('user_id', profileId);
+
+  for (const candidateId of candidateIds) {
+    if (resetCount > 0) break;
+    resetCount += await resetByColumn('id', candidateId);
+  }
+
+  for (const candidateId of candidateIds) {
+    if (resetCount > 0) break;
+    resetCount += await resetByColumn('content->>id', candidateId);
+  }
+
+  if (resetCount === 0) {
+    console.warn('AI interview transcript deleted, but no candidates row matched for AI refinement reset.', {
+      profileId,
+      candidateIds,
+    });
+  }
 };
 
 // ── Data export (GDPR Article 20 — portability) ───────────────────────────────
