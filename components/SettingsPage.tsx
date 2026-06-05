@@ -114,6 +114,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   const [deleteAccountError, setDeleteAccountError] = useState('');
+  const [isDeleteAiDataModalOpen, setIsDeleteAiDataModalOpen] = useState(false);
   const [isDeletingAiData, setIsDeletingAiData] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [reRefineModal, setReRefineModal] = useState<{ updatedProfile: Partial<CandidateProfile> } | null>(null);
@@ -575,14 +576,11 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   };
 
   const handleDeleteAiData = async () => {
-    if (!window.confirm(text(
-      'This will permanently delete your AI interview transcript and reset your AI refinement status. Continue?',
-      'Questo eliminerà definitivamente la transcript dell\'intervista AI e resetterà il tuo stato di affinamento AI. Continuare?'
-    ))) return;
     setIsDeletingAiData(true);
     try {
       await deleteAiInterviewData(candidate);
       setLatestRefinementChat(null);
+      setIsDeleteAiDataModalOpen(false);
       onUpdateProfile({ ...candidate, ai_refined: false, ai_refined_at: undefined });
       toast.success(text('AI interview data deleted.', 'Dati intervista AI eliminati.'));
     } catch (err: any) {
@@ -853,7 +851,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                               </button>
                               <button
                                 type="button"
-                                onClick={() => void handleDeleteAiData()}
+                                onClick={() => setIsDeleteAiDataModalOpen(true)}
                                 disabled={isDeletingAiData}
                                 className="rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50 dark:border-red-900/50 dark:bg-red-950/20 dark:text-red-400 dark:hover:bg-red-900/30"
                               >
@@ -1046,6 +1044,41 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
                 className="flex-1 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-50"
               >
                 {isDeletingAccount ? text('Deleting…', 'Eliminazione…') : text('Delete forever', 'Elimina per sempre')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete AI data confirmation modal */}
+      {isDeleteAiDataModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => !isDeletingAiData && setIsDeleteAiDataModalOpen(false)}>
+          <div className="w-full max-w-md rounded-3xl border border-red-200 bg-white p-8 shadow-2xl dark:border-red-900/50 dark:bg-slate-950" onClick={(e) => e.stopPropagation()}>
+            <h2 className="mb-2 text-xl font-bold text-red-600 dark:text-red-400">
+              {text('Delete AI interview data', 'Elimina dati intervista AI')}
+            </h2>
+            <p className="mb-6 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+              {text(
+                'This will permanently delete your AI interview transcript and reset your AI refinement status. This cannot be undone.',
+                'Questo eliminerà definitivamente la transcript dell\'intervista AI e resetterà il tuo stato di affinamento AI. Non è reversibile.'
+              )}
+            </p>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setIsDeleteAiDataModalOpen(false)}
+                disabled={isDeletingAiData}
+                className="flex-1 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+              >
+                {text('Cancel', 'Annulla')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDeleteAiData()}
+                disabled={isDeletingAiData}
+                className="flex-1 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+              >
+                {isDeletingAiData ? text('Deleting…', 'Eliminazione…') : text('Delete AI data', 'Elimina dati AI')}
               </button>
             </div>
           </div>
